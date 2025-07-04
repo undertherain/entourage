@@ -70,6 +70,18 @@ class CLI:
                 break
             if not user_message:
                 break
+
+            if user_message.strip() == "/new":
+                # Reset chat history and create new chat file
+                self.agent.messages = []
+                new_chat_uuid = str(uuid.uuid4())
+                chat_dir = Path(os.path.expanduser("~/.entourage/chats"))
+                chat_dir.mkdir(parents=True, exist_ok=True)
+                new_chat_file_path = chat_dir / f"{new_chat_uuid}.json"
+                self.agent.chat_file_path = str(new_chat_file_path)
+                print(f"\n[New chat started. Chat ID: {new_chat_uuid}]\n")
+                continue
+
             res = self.agent.__call__(user_message)
             print()
             print(res)

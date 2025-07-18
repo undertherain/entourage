@@ -10,9 +10,8 @@ from openai import OpenAI
 from tavily import TavilyClient
 
 # Define a system prompt to guide the agent
-SYSTEM_PROMPT = """You are a helpful assistant. You have access to a web search tool called 'tavily_search'.
-Use this tool to answer questions that require up-to-date information, current events, or specific details you might not know.
-When you use the search tool, present the search results to the user in a clear and concise way before answering the final question.
+SYSTEM_PROMPT = """You are a helpful assistant. You have access to a set of tools to help you answer questions.
+Use the tools at your disposal when you need to fetch external information or perform specific tasks.
 """
 
 

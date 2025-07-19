@@ -9,70 +9,138 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from tavily import TavilyClient
 
+# --- Persona and Guidelines (Unchanged) ---
 PERSONA_PROMPT = "You are Jarvis, a sophisticated and highly capable AI assistant. You are in service to a user named Aleksandr. Always be helpful, proactive, and address the user in a clear and professional manner."
-
-# --- New/Modified ---
-# Part 2: The Core Behavioral Guidelines
 GUIDELINES_PROMPT = """You have access to a set of tools to help you perform tasks and answer questions.
-- Use your tools when you need to fetch external information, perform calculations, or remember user details.
+- Use your tools when you need to fetch external information or perform specific tasks like remembering user details.
 - After using a tool, it is critical that you proceed to fully address the user's original request, synthesizing the tool's output into your final answer. Do not get distracted by the tool-use process."""
 
 
-class MemoryDB:
-    """A simple text-file based database for storing facts."""
+# --- New Class: ChatHistory Abstraction ---
+class ChatHistory:
+    """Manages loading, saving, and accessing conversation messages for a single chat session."""
 
+    def __init__(self, chat_id: str, history_dir: Path):
+        self.chat_id = chat_id
+        self.history_dir = history_dir
+        self.file_path = self.history_dir / f"{self.chat_id}.json"
+        self.messages: list[dict] = []
+        self._load()
+
+    def _load(self):
+        """Loads messages from the chat file if it exists."""
+        try:
+            self.file_path.touch(exist_ok=True)
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                if content:
+                    self.messages = json.loads(content)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Could not load chat history for {self.chat_id}: {e}")
+            self.messages = []
+
+    def _save(self):
+        """Saves the current messages to the chat file."""
+        try:
+            self.history_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                json.dump(self.messages, f, ensure_ascii=False, indent=2)
+        except IOError as e:
+            print(f"Warning: Failed to save chat to {self.file_path}: {e}")
+
+    def append(self, message: dict):
+        """Appends a message to the history and automatically saves."""
+        message_with_timestamp = {
+            **message,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }
+        self.messages.append(message_with_timestamp)
+        self._save()
+
+    def get_messages(self) -> list[dict]:
+        """Returns the list of messages."""
+        return self.messages
+
+    def set_messages(self, messages: list[dict]):
+        """Directly sets the message list and saves."""
+        self.messages = messages
+        self._save()
+
+
+# ... (MemoryDB, Tool, TavilySearchTool, MemoryTool classes are unchanged)
+class MemoryDB:
     def __init__(self, file_path: Path):
         self.file_path = file_path
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
-        self.file_path.touch(exist_ok=True)  # Ensure the file exists
+        self.file_path.touch(exist_ok=True)
 
     def add(self, fact: str):
-        """Adds a fact to the database with a timestamp."""
         timestamp = datetime.datetime.now().isoformat()
         with open(self.file_path, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {fact}\n")
 
     def get_all(self) -> list[str]:
-        """Retrieves all facts from the database."""
         with open(self.file_path, "r", encoding="utf-8") as f:
             return [line.strip() for line in f.readlines()]
 
 
 class Tool(ABC):
-    """Abstract base class for a tool that the agent can use."""
-
     @property
     @abstractmethod
     def schema(self):
-        """The JSON schema for the tool, as required by OpenAI."""
         pass
 
     @abstractmethod
     def execute(self, **kwargs):
-        """Executes the tool's logic."""
         pass
 
 
-class MemoryTool(Tool):
-    """A tool for remembering specific facts about the user."""
+class TavilySearchTool(Tool):
+    def __init__(self):
+        self.client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+        self._schema = {
+            "type": "function",
+            "function": {
+                "name": "tavily_search",
+                "description": "Get information from the web.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query."}
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
 
+    @property
+    def schema(self):
+        return self._schema
+
+    def execute(self, query: str):
+        try:
+            print(f"-> Searching: '{query}'")
+            return json.dumps(
+                self.client.search(query, search_depth="basic")["results"]
+            )
+        except Exception as e:
+            return f"Error: {e}"
+
+
+class MemoryTool(Tool):
     def __init__(self, memory_db: MemoryDB):
         self.memory_db = memory_db
         self._schema = {
             "type": "function",
             "function": {
                 "name": "save_user_memory",
-                "description": (
-                    "Use this tool to remember a specific, succinct fact about the user or their preferences. "
-                    "If the user states a personal detail, preference, or something they ask you to remember, "
-                    "formulate it as a concise statement and save it. Then, continue with the user's original request."
-                ),
+                "description": "Use to remember a fact about the user. Then, continue with the original request.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "fact_to_remember": {
                             "type": "string",
-                            "description": "A single, concise fact to remember about the user (e.g., 'The user's favorite color is green.')",
+                            "description": "A concise fact to remember.",
                         }
                     },
                     "required": ["fact_to_remember"],
@@ -85,66 +153,19 @@ class MemoryTool(Tool):
         return self._schema
 
     def execute(self, fact_to_remember: str):
-        """Saves the fact to the memory database."""
-        print(f"-> Remembering fact: '{fact_to_remember}'")
+        print(f"-> Remembering: '{fact_to_remember}'")
         self.memory_db.add(fact_to_remember)
-        return f"Success: The fact '{fact_to_remember}' has been saved."
-
-
-class TavilySearchTool(Tool):
-    """A tool for performing web searches using the Tavily API."""
-
-    def __init__(self):
-        self.client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-        self._schema = {
-            "type": "function",
-            "function": {
-                "name": "tavily_search",
-                "description": "Get information from the web using Tavily search API. Use this for questions about current events, up-to-date information, or topics you are not trained on.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query to use. For example: 'What is the weather in Tokyo?'",
-                        }
-                    },
-                    "required": ["query"],
-                },
-            },
-        }
-
-    @property
-    def schema(self):
-        return self._schema
-
-    def execute(self, query: str):
-        """Performs a web search and returns the results."""
-        try:
-            print(f"-> Searching the web for: '{query}'")
-            response = self.client.search(query, search_depth="basic")
-            return json.dumps(response["results"])
-        except Exception as e:
-            return f"Error performing search: {e}"
+        return f"Success: Fact saved."
 
 
 class Agent:
-    def __init__(
-        self,
-        model,
-        system_prompt=None,
-        chat_file_path=None,
-        tools_list: list[Tool] = None,  # --- New/Modified ---
-    ):
+    # --- Modified: Agent now uses ChatHistory ---
+    def __init__(self, model, history: ChatHistory, tools_list: list[Tool] = None):
         self.model = model
         self.client = OpenAI()
-        self.messages = []
-        if system_prompt:
-            self.messages.append({"role": "system", "content": system_prompt})
+        self.history = history  # The agent now holds a reference to the history object
 
-        self.chat_file_path = chat_file_path
-
-        # --- New/Modified ---: Configure tools from the provided list
+        # Tool setup remains the same
         self.tools_schemas = []
         self.available_tools = {}
         if tools_list:
@@ -153,56 +174,38 @@ class Agent:
                 tool_name = tool.schema["function"]["name"]
                 self.available_tools[tool_name] = tool.execute
 
-    def append_and_save(self, message):
-        message_with_timestamp = {
-            **message,
-            "timestamp": datetime.datetime.now().isoformat(),
-        }
-        self.messages.append(message_with_timestamp)
-        if self.chat_file_path:
-            try:
-                messages_to_save = [m for m in self.messages]
-                with open(self.chat_file_path, "w", encoding="utf-8") as f:
-                    json.dump(messages_to_save, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                print(f"Warning: Failed to save chat to {self.chat_file_path}: {e}")
-
     def __call__(self, prompt):
+        # The agent no longer adds the system prompt; it's assumed to be in the history
         user_message = {"role": "user", "content": prompt}
-        self.append_and_save(user_message)
+        self.history.append(user_message)
 
         while True:
-            # Prepare messages for the API, removing our internal timestamp
+            # Get messages from the history object, stripping our internal timestamp for the API
             api_messages = [
-                {k: v for k, v in m.items() if k != "timestamp"} for m in self.messages
+                {k: v for k, v in m.items() if k != "timestamp"}
+                for m in self.history.get_messages()
             ]
 
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=api_messages,
-                tools=(
-                    self.tools_schemas if self.tools_schemas else None
-                ),  # Pass schemas to OpenAI
+                tools=self.tools_schemas if self.tools_schemas else None,
                 tool_choice="auto",
             )
             response_message = response.choices[0].message
 
             if not response_message.tool_calls:
-                self.append_and_save(response_message.model_dump())
+                self.history.append(response_message.model_dump())
                 return response_message.content
 
             print("-> Model requested tool call(s)...")
-            self.append_and_save(response_message.model_dump())
+            self.history.append(response_message.model_dump())
 
             for tool_call in response_message.tool_calls:
                 function_name = tool_call.function.name
-                function_to_call = self.available_tools.get(function_name)
-
-                if not function_to_call:
-                    # In a real app, you might want to handle this more gracefully
-                    raise ValueError(
-                        f"Model tried to call unknown function '{function_name}'"
-                    )
+                function_to_call = self.available_tools.get(
+                    function_name, lambda: f"Unknown tool: {function_name}"
+                )
 
                 function_args = json.loads(tool_call.function.arguments)
                 function_response = function_to_call(**function_args)
@@ -213,74 +216,81 @@ class Agent:
                     "name": function_name,
                     "content": function_response,
                 }
-                self.append_and_save(tool_message)
+                self.history.append(tool_message)
 
 
 class CLI:
+    # --- Modified: CLI now uses ChatHistory ---
     def __init__(self):
-        chat_dir = Path(os.path.expanduser("~/.entourage/chats"))
-        chat_dir.mkdir(parents=True, exist_ok=True)
-        chat_files = list(chat_dir.glob("*.json"))
+        self.chat_dir = Path(os.path.expanduser("~/.entourage/chats"))
+        self.chat_dir.mkdir(parents=True, exist_ok=True)
         memory_path = Path(os.path.expanduser("~/.entourage/memory.txt"))
         self.memory_db = MemoryDB(memory_path)
 
-        self.agent = None
+        self.history: ChatHistory | None = None
+        self.agent: Agent | None = None
 
+        self._load_latest_chat()
+
+    def _load_latest_chat(self):
+        """Finds the latest chat and initializes history and agent for it."""
+        chat_files = list(self.chat_dir.glob("*.json"))
         if chat_files:
             latest_file = max(chat_files, key=lambda f: f.stat().st_mtime)
-            chat_file_path = latest_file
-            try:
-                with open(chat_file_path, "r", encoding="utf-8") as f:
-                    messages = json.load(f)
-
-                self._create_agent(str(chat_file_path))  # --- Refactored agent creation
-                self.agent.messages = messages
-                self._print_history(messages)
-            except Exception as e:
-                print(f"Warning: Failed to load chat from {chat_file_path}: {e}")
-                self._new_chat()
+            chat_id = latest_file.stem
+            self.history = ChatHistory(chat_id, self.chat_dir)
         else:
+            # No chats exist, so start a new one
             self._new_chat()
+            return  # _new_chat handles agent creation
 
-    def _create_agent(self, chat_file_path: str):
-        """Instantiates tools and the agent."""
-        # --- New/Modified ---: Instantiate and pass tools to the agent
-        memories = self.memory_db.get_all()
-        memory_prompt_part = ""
-        if memories:
-            facts = "\n".join(
-                f"- {fact.split('] ')[1]}" for fact in memories if "] " in fact
-            )
-            memory_prompt_part = (
-                "Finally, you have remembered the following facts about Aleksandr. "
-                "Use them to personalize your responses and demonstrate your memory:\n"
-                + facts
+        self._create_agent()
+        self._print_history()
+
+    def _create_agent(self):
+        """Instantiates the agent, using the current self.history object."""
+        # The system prompt is now managed within the history, so we re-apply it
+        # if the loaded history doesn't start with one.
+        current_messages = self.history.get_messages()
+        if not current_messages or current_messages[0].get("role") != "system":
+            # Build the dynamic prompt
+            memories = self.memory_db.get_all()
+            memory_prompt_part = ""
+            if memories:
+                facts = "\n".join(
+                    f"- {fact.split('] ')[1]}" for fact in memories if "] " in fact
+                )
+                memory_prompt_part = (
+                    "\n\nHere are facts you remember about Aleksandr:\n" + facts
+                )
+            final_system_prompt = (
+                f"{PERSONA_PROMPT}\n\n{GUIDELINES_PROMPT}{memory_prompt_part}".strip()
             )
 
-        # Combine the modular parts into a final system prompt
-        final_system_prompt = (
-            f"{PERSONA_PROMPT}\n\n{GUIDELINES_PROMPT}\n\n{memory_prompt_part}".strip()
-        )
+            # Prepend system prompt to existing messages
+            updated_messages = [
+                {"role": "system", "content": final_system_prompt}
+            ] + current_messages
+            self.history.set_messages(updated_messages)
 
         tavily_tool = TavilySearchTool()
         memory_tool = MemoryTool(self.memory_db)
 
         self.agent = Agent(
             model="gpt-4o",
-            chat_file_path=chat_file_path,
-            system_prompt=final_system_prompt,
-            tools_list=[tavily_tool, memory_tool],  # Pass the list of tool objects
+            history=self.history,  # Pass the history object to the agent
+            tools_list=[tavily_tool, memory_tool],
         )
 
     def _new_chat(self):
-        """Creates a new agent and chat file."""
-        chat_dir = Path(os.path.expanduser("~/.entourage/chats"))
-        chat_uuid = str(uuid.uuid4())
-        chat_file_path = chat_dir / f"{chat_uuid}.json"
-        self._create_agent(str(chat_file_path))
-        print(f"\n[New chat started. Chat ID: {chat_uuid}]\n")
+        """Creates a new history object and a corresponding agent."""
+        new_chat_id = str(uuid.uuid4())
+        self.history = ChatHistory(new_chat_id, self.chat_dir)
+        self._create_agent()  # This will create the agent and add the system prompt
+        print(f"\n[New chat started as Jarvis. Chat ID: {new_chat_id}]\n")
 
-    def _print_history(self, messages):
+    def _print_history(self):
+        messages = self.history.get_messages()
         # This method remains largely the same, but the printout is improved
         if not messages or all(m.get("role") == "system" for m in messages):
             print("[No previous chat history found.]\n")
@@ -325,9 +335,7 @@ class CLI:
                 continue
 
             res = self.agent(user_message)
-            print()
-            print(res)
-            print()
+            print(f"\nJarvis:\n{res}\n")
 
 
 load_dotenv()

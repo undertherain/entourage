@@ -9,10 +9,33 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from tavily import TavilyClient
 
-# Define a system prompt to guide the agent
-SYSTEM_PROMPT = """You are a helpful assistant. You have access to a set of tools to help you answer questions.
-Use the tools at your disposal when you need to fetch external information or perform specific tasks.
-"""
+PERSONA_PROMPT = "You are Jarvis, a sophisticated and highly capable AI assistant. You are in service to a user named Aleksandr. Always be helpful, proactive, and address the user in a clear and professional manner."
+
+# --- New/Modified ---
+# Part 2: The Core Behavioral Guidelines
+GUIDELINES_PROMPT = """You have access to a set of tools to help you perform tasks and answer questions.
+- Use your tools when you need to fetch external information, perform calculations, or remember user details.
+- After using a tool, it is critical that you proceed to fully address the user's original request, synthesizing the tool's output into your final answer. Do not get distracted by the tool-use process."""
+
+
+class MemoryDB:
+    """A simple text-file based database for storing facts."""
+
+    def __init__(self, file_path: Path):
+        self.file_path = file_path
+        self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        self.file_path.touch(exist_ok=True)  # Ensure the file exists
+
+    def add(self, fact: str):
+        """Adds a fact to the database with a timestamp."""
+        timestamp = datetime.datetime.now().isoformat()
+        with open(self.file_path, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {fact}\n")
+
+    def get_all(self) -> list[str]:
+        """Retrieves all facts from the database."""
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f.readlines()]
 
 
 class Tool(ABC):
@@ -28,6 +51,44 @@ class Tool(ABC):
     def execute(self, **kwargs):
         """Executes the tool's logic."""
         pass
+
+
+class MemoryTool(Tool):
+    """A tool for remembering specific facts about the user."""
+
+    def __init__(self, memory_db: MemoryDB):
+        self.memory_db = memory_db
+        self._schema = {
+            "type": "function",
+            "function": {
+                "name": "save_user_memory",
+                "description": (
+                    "Use this tool to remember a specific, succinct fact about the user or their preferences. "
+                    "If the user states a personal detail, preference, or something they ask you to remember, "
+                    "formulate it as a concise statement and save it. Then, continue with the user's original request."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "fact_to_remember": {
+                            "type": "string",
+                            "description": "A single, concise fact to remember about the user (e.g., 'The user's favorite color is green.')",
+                        }
+                    },
+                    "required": ["fact_to_remember"],
+                },
+            },
+        }
+
+    @property
+    def schema(self):
+        return self._schema
+
+    def execute(self, fact_to_remember: str):
+        """Saves the fact to the memory database."""
+        print(f"-> Remembering fact: '{fact_to_remember}'")
+        self.memory_db.add(fact_to_remember)
+        return f"Success: The fact '{fact_to_remember}' has been saved."
 
 
 class TavilySearchTool(Tool):
@@ -160,6 +221,8 @@ class CLI:
         chat_dir = Path(os.path.expanduser("~/.entourage/chats"))
         chat_dir.mkdir(parents=True, exist_ok=True)
         chat_files = list(chat_dir.glob("*.json"))
+        memory_path = Path(os.path.expanduser("~/.entourage/memory.txt"))
+        self.memory_db = MemoryDB(memory_path)
 
         self.agent = None
 
@@ -182,12 +245,31 @@ class CLI:
     def _create_agent(self, chat_file_path: str):
         """Instantiates tools and the agent."""
         # --- New/Modified ---: Instantiate and pass tools to the agent
+        memories = self.memory_db.get_all()
+        memory_prompt_part = ""
+        if memories:
+            facts = "\n".join(
+                f"- {fact.split('] ')[1]}" for fact in memories if "] " in fact
+            )
+            memory_prompt_part = (
+                "Finally, you have remembered the following facts about Aleksandr. "
+                "Use them to personalize your responses and demonstrate your memory:\n"
+                + facts
+            )
+
+        # Combine the modular parts into a final system prompt
+        final_system_prompt = (
+            f"{PERSONA_PROMPT}\n\n{GUIDELINES_PROMPT}\n\n{memory_prompt_part}".strip()
+        )
+
         tavily_tool = TavilySearchTool()
+        memory_tool = MemoryTool(self.memory_db)
+
         self.agent = Agent(
             model="gpt-4o",
             chat_file_path=chat_file_path,
-            system_prompt=SYSTEM_PROMPT,
-            tools_list=[tavily_tool],  # Pass the list of tool objects
+            system_prompt=final_system_prompt,
+            tools_list=[tavily_tool, memory_tool],  # Pass the list of tool objects
         )
 
     def _new_chat(self):
@@ -251,7 +333,3 @@ class CLI:
 load_dotenv()
 cli = CLI()
 cli.run()
-# agent = Agent()
-# agent()
-# res = agent("whats's two plus two?")
-# print(res)

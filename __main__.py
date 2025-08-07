@@ -9,14 +9,30 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from tavily import TavilyClient
 
-# --- Persona and Guidelines (Unchanged) ---
-PERSONA_PROMPT = "You are Jarvis, a sophisticated and highly capable AI assistant. You are in service to a user named Aleksandr. Always be helpful, proactive, and address the user in a clear and professional manner."
-GUIDELINES_PROMPT = """You have access to a set of tools to help you perform tasks and answer questions.
+
+class PersonaConfig:
+    """A single place to configure the assistant's persona."""
+
+    def __init__(
+        self, agent_name: str, user_name: str, persona_template: str, guidelines: str
+    ):
+        self.agent_name = agent_name
+        self.user_name = user_name
+        self.persona_template = persona_template
+        self.guidelines = guidelines
+
+
+# --- New/Modified: The single source of truth for this assistant ---
+APP_CONFIG = PersonaConfig(
+    agent_name="Jarvis",
+    user_name="Aleksandr",
+    persona_template="You are {agent_name}, a sophisticated and highly capable AI assistant. You are in service to a user named {user_name}. Always be helpful, proactive, and address the user in a clear and professional manner.",
+    guidelines="""You have access to a set of tools to help you perform tasks and answer questions.
 - Use your tools when you need to fetch external information or perform specific tasks like remembering user details.
-- After using a tool, it is critical that you proceed to fully address the user's original request, synthesizing the tool's output into your final answer. Do not get distracted by the tool-use process."""
+- After using a tool, it is critical that you proceed to fully address the user's original request, synthesizing the tool's output into your final answer. Do not get distracted by the tool-use process.""",
+)
 
 
-# --- New Class: ChatHistory Abstraction ---
 class ChatHistory:
     """Manages loading, saving, and accessing conversation messages for a single chat session."""
 
@@ -221,10 +237,21 @@ class Agent:
 
 class CLI:
     # --- Modified: CLI now uses ChatHistory ---
-    def __init__(self):
-        self.chat_dir = Path(os.path.expanduser("~/.entourage/chats"))
+    def __init__(self, config: PersonaConfig):
+        self.config = config
+        # --- New/Modified: Group all agent files under a single directory ---
+        agent_name_lower = self.config.agent_name.lower()
+
+        # 1. Define a single base directory for the agent
+        agent_base_dir = Path(os.path.expanduser(f"~/.entourage/{agent_name_lower}"))
+        agent_base_dir.mkdir(parents=True, exist_ok=True)
+
+        # 2. Place chat history in a 'chats' subdirectory within it
+        self.chat_dir = agent_base_dir / "chats"
         self.chat_dir.mkdir(parents=True, exist_ok=True)
-        memory_path = Path(os.path.expanduser("~/.entourage/memory.txt"))
+
+        # 3. Place the memory file directly within the agent's base directory
+        memory_path = agent_base_dir / "memory.txt"
         self.memory_db = MemoryDB(memory_path)
 
         self.history: ChatHistory | None = None
@@ -248,26 +275,32 @@ class CLI:
         self._print_history()
 
     def _create_agent(self):
-        """Instantiates the agent, using the current self.history object."""
-        # The system prompt is now managed within the history, so we re-apply it
-        # if the loaded history doesn't start with one.
+        # --- Modified: Prompts are now built from the config object ---
         current_messages = self.history.get_messages()
         if not current_messages or current_messages[0].get("role") != "system":
-            # Build the dynamic prompt
+            # Part 1: Persona
+            persona_prompt = self.config.persona_template.format(
+                agent_name=self.config.agent_name, user_name=self.config.user_name
+            )
+            # Part 2: Guidelines
+            guidelines_prompt = self.config.guidelines
+            # Part 3: Memory
             memories = self.memory_db.get_all()
             memory_prompt_part = ""
             if memories:
                 facts = "\n".join(
                     f"- {fact.split('] ')[1]}" for fact in memories if "] " in fact
                 )
+                # No more hard-coded name!
                 memory_prompt_part = (
-                    "\n\nHere are facts you remember about Aleksandr:\n" + facts
+                    f"\n\nHere are facts you remember about {self.config.user_name}:\n"
+                    + facts
                 )
+
             final_system_prompt = (
-                f"{PERSONA_PROMPT}\n\n{GUIDELINES_PROMPT}{memory_prompt_part}".strip()
+                f"{persona_prompt}\n\n{guidelines_prompt}{memory_prompt_part}".strip()
             )
 
-            # Prepend system prompt to existing messages
             updated_messages = [
                 {"role": "system", "content": final_system_prompt}
             ] + current_messages
@@ -277,8 +310,8 @@ class CLI:
         memory_tool = MemoryTool(self.memory_db)
 
         self.agent = Agent(
-            model="gpt-4o",
-            history=self.history,  # Pass the history object to the agent
+            model="gpt-4.1-nano",
+            history=self.history,
             tools_list=[tavily_tool, memory_tool],
         )
 
@@ -339,5 +372,5 @@ class CLI:
 
 
 load_dotenv()
-cli = CLI()
+cli = CLI(config=APP_CONFIG)
 cli.run()

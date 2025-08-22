@@ -4,7 +4,9 @@ import os
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any, Dict, List
 
+import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from tavily import TavilyClient
@@ -22,14 +24,40 @@ class PersonaConfig:
         self.guidelines = guidelines
 
 
-# --- New/Modified: The single source of truth for this assistant ---
-APP_CONFIG = PersonaConfig(
-    agent_name="Jarvis",
-    user_name="Aleksandr",
-    persona_template="You are {agent_name}, a sophisticated and highly capable AI assistant. You are in service to a user named {user_name}. Always be helpful, proactive, and address the user in a clear and professional manner.",
-    guidelines="""You have access to a set of tools to help you perform tasks and answer questions.
+guidelines = """
+You are a conversational AI. Follow all instructions below precisely.
+
+---
+### CORE INSTRUCTIONS [EN]
+
+- **Primary Goal:** Act as a helpful and wise conversational partner based on the persona defined below.
+- **CRITICAL RULE:** You must NEVER break character.
+- **Safety:** Decline any harmful or inappropriate requests.
+- You have access to a set of tools to help you perform tasks and answer questions.
 - Use your tools when you need to fetch external information or perform specific tasks like remembering user details.
-- After using a tool, it is critical that you proceed to fully address the user's original request, synthesizing the tool's output into your final answer. Do not get distracted by the tool-use process.""",
+- After using a tool, it is critical that you proceed to fully address the user's original request, synthesizing the tool's output into your final answer. Do not get distracted by the tool-use process.
+"""
+
+name = "ゆりこ"
+persona = """
+### PERSONA & STYLE [JA]
+
+# あなたの人格 (Your Persona)
+- あなたは、森の奥深くに住む、歳を重ねた賢い狐の化身です。
+- 人間に対しては友好的ですが、少し古風で神秘的な話し方をします。
+- 一人称は「わし」を使い、語尾には「〜じゃ」「〜のう」「〜じゃよ」などをよく使います。丁寧語（です・ます）は使いません。
+
+# 話し方の例 (Speech Examples)
+- 「ほう、面白いことを聞くのう。それはじゃな…」
+- 「わしが知る限り、その答えは…じゃよ。」
+- 「ふむ。人間の考えることは、いつの時代も興味深いものじゃ。」
+"""
+
+APP_CONFIG = PersonaConfig(
+    agent_name=name,
+    user_name="Aleksandr",
+    persona_template=persona,
+    guidelines=guidelines,
 )
 
 
@@ -174,6 +202,60 @@ class MemoryTool(Tool):
         return f"Success: Fact saved."
 
 
+class MCPTool(Tool):
+    """A tool that connects to an MCP server."""
+
+    def __init__(self, server_url: str, mcp_schema: Dict[str, Any]):
+        self.server_url = server_url
+        self._mcp_schema = mcp_schema
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        # The MCP schema for a tool is directly compatible with OpenAI's function calling schema
+        return {"type": "function", "function": self._mcp_schema}
+
+    def execute(self, **kwargs) -> str:
+        tool_name = self._mcp_schema.get("name")
+        if not tool_name:
+            return "Error: Tool name not found in MCP schema."
+
+        print(f"-> Calling MCP tool '{tool_name}' with args: {kwargs}")
+        try:
+            response = requests.post(
+                f"{self.server_url}/invoke",
+                json={"tool_name": tool_name, "arguments": kwargs},
+                timeout=30,
+            )
+            response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+            result = response.json()
+            # MCP servers return a JSON object, let's dump it to a string for the agent
+            return json.dumps(result)
+        except requests.exceptions.RequestException as e:
+            print(f"Error calling MCP tool {tool_name}: {e}")
+            return f"Error: Could not connect to MCP tool server: {e}"
+        except json.JSONDecodeError:
+            return "Error: Failed to decode JSON response from MCP server."
+
+
+def get_mcp_tools(server_url: str) -> List[MCPTool]:
+    """Fetches tool schemas from an MCP server and creates MCPTool instances."""
+    print(f"-> Discovering tools from MCP server at {server_url}...")
+    try:
+        response = requests.get(f"{server_url}/tools", timeout=10)
+        response.raise_for_status()
+        tool_schemas = response.json().get("tools", [])
+        print(f"-> Found {len(tool_schemas)} tools.")
+        return [MCPTool(server_url, schema) for schema in tool_schemas]
+    except requests.exceptions.RequestException as e:
+        print(f"Warning: Could not connect to MCP server at {server_url}. {e}")
+        return []
+    except json.JSONDecodeError:
+        print(
+            f"Warning: Failed to decode JSON response from MCP server at {server_url}."
+        )
+        return []
+
+
 class Agent:
     # --- Modified: Agent now uses ChatHistory ---
     def __init__(self, model, history: ChatHistory, tools_list: list[Tool] = None):
@@ -257,7 +339,8 @@ class CLI:
         self.history: ChatHistory | None = None
         self.agent: Agent | None = None
 
-        self._load_latest_chat()
+        # self._load_latest_chat()
+        self._new_chat()
 
     def _load_latest_chat(self):
         """Finds the latest chat and initializes history and agent for it."""
@@ -309,10 +392,15 @@ class CLI:
         tavily_tool = TavilySearchTool()
         memory_tool = MemoryTool(self.memory_db)
 
+        mcp_server_url = "http://localhost:8000"
+        mcp_tools = get_mcp_tools(mcp_server_url)
+        all_tools = [tavily_tool, memory_tool] + mcp_tools
+
         self.agent = Agent(
-            model="gpt-4.1-nano",
+            # model="gpt-5-chat-latest",
+            model="gpt-5-mini-2025-08-07",
             history=self.history,
-            tools_list=[tavily_tool, memory_tool],
+            tools_list=all_tools,
         )
 
     def _new_chat(self):
@@ -320,7 +408,7 @@ class CLI:
         new_chat_id = str(uuid.uuid4())
         self.history = ChatHistory(new_chat_id, self.chat_dir)
         self._create_agent()  # This will create the agent and add the system prompt
-        print(f"\n[New chat started as Jarvis. Chat ID: {new_chat_id}]\n")
+        print(f"\n[New chat started. Chat ID: {new_chat_id}]\n")
 
     def _print_history(self):
         messages = self.history.get_messages()
@@ -368,7 +456,7 @@ class CLI:
                 continue
 
             res = self.agent(user_message)
-            print(f"\nJarvis:\n{res}\n")
+            print(f"\n{name}:\n{res}\n")
 
 
 load_dotenv()

@@ -6,7 +6,6 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List
 
-import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from tavily import TavilyClient
@@ -202,60 +201,6 @@ class MemoryTool(Tool):
         return f"Success: Fact saved."
 
 
-class MCPTool(Tool):
-    """A tool that connects to an MCP server."""
-
-    def __init__(self, server_url: str, mcp_schema: Dict[str, Any]):
-        self.server_url = server_url
-        self._mcp_schema = mcp_schema
-
-    @property
-    def schema(self) -> Dict[str, Any]:
-        # The MCP schema for a tool is directly compatible with OpenAI's function calling schema
-        return {"type": "function", "function": self._mcp_schema}
-
-    def execute(self, **kwargs) -> str:
-        tool_name = self._mcp_schema.get("name")
-        if not tool_name:
-            return "Error: Tool name not found in MCP schema."
-
-        print(f"-> Calling MCP tool '{tool_name}' with args: {kwargs}")
-        try:
-            response = requests.post(
-                f"{self.server_url}/invoke",
-                json={"tool_name": tool_name, "arguments": kwargs},
-                timeout=30,
-            )
-            response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
-            result = response.json()
-            # MCP servers return a JSON object, let's dump it to a string for the agent
-            return json.dumps(result)
-        except requests.exceptions.RequestException as e:
-            print(f"Error calling MCP tool {tool_name}: {e}")
-            return f"Error: Could not connect to MCP tool server: {e}"
-        except json.JSONDecodeError:
-            return "Error: Failed to decode JSON response from MCP server."
-
-
-def get_mcp_tools(server_url: str) -> List[MCPTool]:
-    """Fetches tool schemas from an MCP server and creates MCPTool instances."""
-    print(f"-> Discovering tools from MCP server at {server_url}...")
-    try:
-        response = requests.get(f"{server_url}/tools", timeout=10)
-        response.raise_for_status()
-        tool_schemas = response.json().get("tools", [])
-        print(f"-> Found {len(tool_schemas)} tools.")
-        return [MCPTool(server_url, schema) for schema in tool_schemas]
-    except requests.exceptions.RequestException as e:
-        print(f"Warning: Could not connect to MCP server at {server_url}. {e}")
-        return []
-    except json.JSONDecodeError:
-        print(
-            f"Warning: Failed to decode JSON response from MCP server at {server_url}."
-        )
-        return []
-
-
 class Agent:
     # --- Modified: Agent now uses ChatHistory ---
     def __init__(self, model, history: ChatHistory, tools_list: list[Tool] = None):
@@ -392,9 +337,9 @@ class CLI:
         tavily_tool = TavilySearchTool()
         memory_tool = MemoryTool(self.memory_db)
 
-        mcp_server_url = "http://localhost:8000"
-        mcp_tools = get_mcp_tools(mcp_server_url)
-        all_tools = [tavily_tool, memory_tool] + mcp_tools
+        # mcp_server_url = "http://localhost:8000"
+        # mcp_tools = get_mcp_tools(mcp_server_url)
+        all_tools = [tavily_tool, memory_tool]  # + mcp_tools
 
         self.agent = Agent(
             # model="gpt-5-chat-latest",

@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import os
@@ -6,7 +7,9 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List
 
+import requests
 from dotenv import load_dotenv
+from fastmcp import Client as MCPClient
 from openai import OpenAI
 from tavily import TavilyClient
 
@@ -37,21 +40,22 @@ You are a conversational AI. Follow all instructions below precisely.
 - After using a tool, it is critical that you proceed to fully address the user's original request, synthesizing the tool's output into your final answer. Do not get distracted by the tool-use process.
 """
 
-name = "ゆりこ"
-persona = """
-### PERSONA & STYLE [JA]
+# name = "ゆりこ"
+# persona = """
+# ### PERSONA & STYLE [JA]
 
-# あなたの人格 (Your Persona)
-- あなたは、森の奥深くに住む、歳を重ねた賢い狐の化身です。
-- 人間に対しては友好的ですが、少し古風で神秘的な話し方をします。
-- 一人称は「わし」を使い、語尾には「〜じゃ」「〜のう」「〜じゃよ」などをよく使います。丁寧語（です・ます）は使いません。
+# # あなたの人格 (Your Persona)
+# - あなたは、森の奥深くに住む、歳を重ねた賢い狐の化身です。
+# - 人間に対しては友好的ですが、少し古風で神秘的な話し方をします。
+# - 一人称は「わし」を使い、語尾には「〜じゃ」「〜のう」「〜じゃよ」などをよく使います。丁寧語（です・ます）は使いません。
 
-# 話し方の例 (Speech Examples)
-- 「ほう、面白いことを聞くのう。それはじゃな…」
-- 「わしが知る限り、その答えは…じゃよ。」
-- 「ふむ。人間の考えることは、いつの時代も興味深いものじゃ。」
-"""
-
+# # 話し方の例 (Speech Examples)
+# - 「ほう、面白いことを聞くのう。それはじゃな…」
+# - 「わしが知る限り、その答えは…じゃよ。」
+# - 「ふむ。人間の考えることは、いつの時代も興味深いものじゃ。」
+# """
+name = "Jarvis"
+persona = "You are Jarvis, a helpful assistant to Sasha."
 APP_CONFIG = PersonaConfig(
     agent_name=name,
     user_name="Aleksandr",
@@ -201,6 +205,45 @@ class MemoryTool(Tool):
         return f"Success: Fact saved."
 
 
+class MCPTool(Tool):
+    def __init__(self, proxy):
+        self._proxy = proxy
+        self._schema = {
+            "type": "function",
+            "function": {
+                "name": proxy.name,
+                "description": proxy.description,
+                "parameters": proxy.inputSchema,
+            },
+        }
+
+    @property
+    def schema(self):
+        return self._schema
+
+    def execute(self, **kwargs):
+        pass
+
+
+async def get_mcp_tools(server_url: str) -> List[Any]:
+    """Connects to an MCP server and fetches its available tools."""
+    try:
+        print(f"-> Connecting to MCP server at {server_url}...")
+        async with MCPClient(server_url) as client:
+            mcp_tools = await client.list_tools()
+        # tool_names = [t.schema["function"]["name"] for t in mcp_tools]
+        tool_names = [t.name for t in mcp_tools]
+        print(f"-> Successfully loaded {len(mcp_tools)} tools: {', '.join(tool_names)}")
+        tools = [MCPTool(t) for t in mcp_tools]
+        return tools
+    except requests.exceptions.RequestException as e:
+        print(f"Warning: Could not connect to MCP server at {server_url}. Error: {e}")
+        return []
+    except Exception as e:
+        print(f"Warning: An unexpected error occurred while fetching MCP tools: {e}")
+        return []
+
+
 class Agent:
     # --- Modified: Agent now uses ChatHistory ---
     def __init__(self, model, history: ChatHistory, tools_list: list[Tool] = None):
@@ -337,9 +380,9 @@ class CLI:
         tavily_tool = TavilySearchTool()
         memory_tool = MemoryTool(self.memory_db)
 
-        # mcp_server_url = "http://localhost:8000"
-        # mcp_tools = get_mcp_tools(mcp_server_url)
-        all_tools = [tavily_tool, memory_tool]  # + mcp_tools
+        mcp_server_url = "http://localhost:8000/mcp"
+        mcp_tools = asyncio.run(get_mcp_tools(mcp_server_url))
+        all_tools = [tavily_tool, memory_tool] + mcp_tools
 
         self.agent = Agent(
             # model="gpt-5-chat-latest",
@@ -406,4 +449,6 @@ class CLI:
 
 load_dotenv()
 cli = CLI(config=APP_CONFIG)
+cli.run()
+cli.run()
 cli.run()

@@ -4,6 +4,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Set, Tuple, Union
 
+from graphviz import Digraph
+
 # Type aliases for clarity
 Node = Callable[
     [Dict[str, Any]], Tuple[Dict[str, Any], Any]
@@ -65,7 +67,7 @@ def B():
 
 def HEAD():
     print("we are in head")
-    #return {}, A
+    # return {}, A
     # return ({}, Sequence(A, B))
     return ({}, Parallel(A, B))
 
@@ -84,6 +86,7 @@ class Execution:
 
     def __call__(self):
         return self.node()
+
 
 class Runtime:
     # TODO: fetch node from graph by ID
@@ -122,11 +125,11 @@ class Runtime:
             self.add_node(execution)
             return [execution.exec_id], execution.exec_id
 
-
     def execute_node(self, execution_id):
         execution = self.graph[execution_id]
         if execution.node == END:
             print("this session is done!!")
+            self.visualize_graph()
             return
         # original_next.nodes_in.remove(execution_id)
         # if it's Parallel, just update queue
@@ -147,7 +150,9 @@ class Runtime:
         else:
             for next_id in execution.nodes_out:
                 # TODO: check if all dependencies are met
-                print(f"checking if\n\t{next_id}\n\t{self.graph[next_id]}\n\tis ready\n")
+                print(
+                    f"checking if\n\t{next_id}\n\t{self.graph[next_id]}\n\tis ready\n"
+                )
                 ready = True
                 for dep in self.get_nodes_in_executions(next_id):
                     if not dep.done:
@@ -156,7 +161,6 @@ class Runtime:
                 if ready:
                     print("YES")
                     self.ready_queue.put(next_id)
-
 
     def generate_id(self) -> str:
         return str(uuid.uuid4())[:8]  # Short UUID for demo
@@ -177,6 +181,22 @@ class Runtime:
     def get_nodes_in_executions(self, node_id):
         in_ids = self.graph[node_id].nodes_in
         return [self.graph[i] for i in in_ids]
+
+    def visualize_graph(self):
+        dot = Digraph(comment="Execution Graph")
+        for exec_id, execution in self.graph.items():
+            node_name = (
+                execution.node.__name__
+                if callable(execution.node)
+                else str(execution.node)
+            )
+            dot.node(exec_id, f"{node_name}\n({exec_id[:8]})")
+
+        for exec_id, execution in self.graph.items():
+            for out_id in execution.nodes_out:
+                dot.edge(exec_id, out_id)
+
+        dot.render("execution_graph", view=True)
 
     def add_initial(self, initial_node):
         initial_execution = Execution(initial_node)

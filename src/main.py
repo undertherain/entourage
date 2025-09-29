@@ -31,6 +31,9 @@ class Parallel(ControlFlow):
     def __init__(self, *items: Union[Node, "Schedule"]):
         self.items = items
 
+    def __repr__(self):
+        return f"Parallel execution of {self.items}"
+
 
 # .with_timeout(10)
 # .with_merge(my merge)
@@ -44,8 +47,9 @@ def Y():
     pass
 
 
-def MERGE():
-    pass
+def default_merge():
+    print("we are in MERGE")
+    return None, None
 
 
 def A():
@@ -61,8 +65,9 @@ def B():
 
 def HEAD():
     print("we are in head")
+    #return {}, A
     # return ({}, Sequence(A, B))
-    return ({}, Sequence(A, A, B))
+    return ({}, Parallel(A, B))
 
 
 END = object()
@@ -75,16 +80,10 @@ class Execution:
     exec_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     nodes_in: Set[str] = field(default_factory=set)
     nodes_out: Set[str] = field(default_factory=set)
+    done: bool = False
 
     def __call__(self):
         return self.node()
-
-
-# class Graph:
-#     def __init__(self):
-#         self.nodes = {"A"}
-#         self.edges = {"}
-
 
 class Runtime:
     # TODO: fetch node from graph by ID
@@ -98,57 +97,66 @@ class Runtime:
         if isinstance(schedule, Sequence):
             executions = []
             for node in schedule.items:
-                start, end = self.parse_schedule(node)
+                starts, end = self.parse_schedule(node)
                 if executions:
-                    self.add_edge(executions[-1], start)
-                executions.append(start)
+                    for start in starts:
+                        self.add_edge(executions[-1], start)
+                executions.append(starts)
                 executions.append(end)
             return executions[0], executions[-1]
+        elif isinstance(schedule, Parallel):
+            merge = Execution(default_merge)
+            self.add_node(merge)
+            starts = []
+            for node in schedule.items:
+                new_starts, end = self.parse_schedule(node)
+                # self.add_edge(current, start)
+                self.add_edge(end, merge.exec_id)
+                for start in new_starts:
+                    # print("addign node from end of parallel child to merge", start, end)
+                    starts.append(start)
+            return starts, merge.exec_id
         else:
             # single node
             execution = Execution(schedule)
             self.add_node(execution)
-            return execution.exec_id, execution.exec_id
-            # self.graph[execution.exec_id] = execution
-            # return execution.exec_id, execution.exec_id
+            return [execution.exec_id], execution.exec_id
 
-        # in add all nodes to the graph
-        # sever old connections
-        # make a copy of the state in case multple
 
     def execute_node(self, execution_id):
         execution = self.graph[execution_id]
         if execution.node == END:
             print("this session is done!!")
             return
-        original_next = self.graph[execution.nodes_out.pop()]
-        original_next.nodes_in.remove(execution_id)
+        # original_next.nodes_in.remove(execution_id)
         # if it's Parallel, just update queue
         # if isinstance(execution, Parallel):
         # ok we know that node finished
         state, schedule = execution()
+        execution.done = True
         if schedule:
-            assert len(execution.nodes_out) == 0
-            start, end = self.parse_schedule(schedule)
-            print(start, end)
-            last_out = execution.nodes_out
-            execution.nodes_out = start
-            self.add_edge(end, original_next.exec_id)
-            # original_next.nodes_in.add(end)
-            self.ready_queue.put(start)
-            # old_next = execution.
-            # if Parallel: create branches
-            # if isinstance(start.node, Parallel):
-            # for actual_node in start.node.items:
-            # self.ready_queue.put(actual_node)
+            # assert len(execution.nodes_out) == 0
+            original_next = set(execution.nodes_out)
+            print("original next", original_next)
+            starts, end = self.parse_schedule(schedule)
+            self.graph[end].nodes_out = original_next
+            execution.nodes_out = starts
+            print("returned schedule", starts, end)
+            for start in starts:
+                self.ready_queue.put(start)
         else:
-            if not original_next.nodes_in:
-                self.ready_queue.put(original_next.exec_id)
-        # pop current node
-        # if not isinstance(next_steps, tuple):
-        #     next_steps = (next_steps,)
-        # for i in next_steps:
-        #     q.put(i)
+            for next_id in execution.nodes_out:
+                # TODO: check if all dependencies are met
+                print(f"checking if\n\t{next_id}\n\t{self.graph[next_id]}\n\tis ready\n")
+                ready = True
+                for dep in self.get_nodes_in_executions(next_id):
+                    if not dep.done:
+                        ready = False
+                        print("NO")
+                if ready:
+                    print("YES")
+                    self.ready_queue.put(next_id)
+
 
     def generate_id(self) -> str:
         return str(uuid.uuid4())[:8]  # Short UUID for demo
@@ -165,6 +173,10 @@ class Runtime:
 
     def add_node(self, node):
         self.graph[node.exec_id] = node
+
+    def get_nodes_in_executions(self, node_id):
+        in_ids = self.graph[node_id].nodes_in
+        return [self.graph[i] for i in in_ids]
 
     def add_initial(self, initial_node):
         initial_execution = Execution(initial_node)

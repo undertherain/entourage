@@ -17,7 +17,7 @@ logger.addHandler(handler)
 
 # Type aliases for clarity
 Node = Callable[
-    [Dict[str, Any]], Tuple[Dict[str, Any], Any]
+    [Union[Dict[str, Any], List[Dict[str, Any]]]], Tuple[Dict[str, Any], Any]
 ]  # Node: (state) -> (new_state, schedule)
 Schedule = Any  # Will be Sequence, Parallel, or Node
 
@@ -58,23 +58,29 @@ def Y():
     pass
 
 
-def default_merge():
-    logger.info("we are in MERGE")
-    return None, None
+def default_merge(state: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], None]:
+    logger.info("we are in MERGE with states: %s", state)
+    merged_state = {}
+    if isinstance(state, list):
+        for s in state:
+            merged_state.update(s)
+    return merged_state, None
 
 
-def A():
+def A(state: Dict[str, Any]) -> Tuple[Dict[str, str], None]:
     logger.info("we are in A")
     # return Parallel(X, Y)
-    return None, None
+    return {"from_a": "A"}, None
 
 
-def B():
+def B(state: Dict[str, Any]) -> Tuple[Dict[str, str], None]:
     logger.info("we are in B")
-    return None, None
+    return {"from_b": "B"}, None
 
 
-def HEAD():
+def HEAD(
+    state: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Union[Sequence, Parallel]]:
     logger.info("we are in head")
     # return {}, A
     # return ({}, Sequence(A, B))
@@ -103,8 +109,8 @@ class Execution:
     nodes_out: Set[str] = field(default_factory=set)
     done: bool = False
 
-    def __call__(self):
-        return self.node()
+    def __call__(self, state: Union[Dict[str, Any], List[Dict[str, Any]]]):
+        return self.node(state)
 
 
 @dataclass
@@ -113,7 +119,7 @@ class Session:
 
     session_id: str
     graph: Dict[str, Execution] = field(default_factory=dict)
-    initial_state: Dict[str, Any] = field(default_factory=dict)
+    states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     completed: bool = False
 
     def __post_init__(self):
@@ -134,7 +140,6 @@ class Runtime:
     def __init__(self):
         self.ready_queue = queue.Queue()
         self.sessions: Dict[str, Session] = {}
-        self.session_states: Dict[str, Dict[str, Any]] = {}
 
     def parse_schedule(self, schedule, session: Session):
         logger.info("adding schedule %s", schedule)
@@ -179,16 +184,26 @@ class Runtime:
             self.cleanup_session(session_id)
             return
 
-        # Get current state for this session
-        state = self.session_states.get(session_id, {})
+        # Get input states from parent nodes
+        input_states = [
+            session.states[in_id]
+            for in_id in execution.nodes_in
+            if in_id in session.states
+        ]
+        if len(input_states) == 1:
+            state = input_states[0]
+        elif len(input_states) > 1:
+            state = input_states
+        else:
+            state = {}
 
         # Execute the node
-        new_state, schedule = execution()
+        new_state, schedule = execution(state)
         execution.done = True
 
-        # Update session state
-        if new_state:
-            self.session_states[session_id] = new_state
+        # Store the output state for this execution
+        if new_state is not None:
+            session.states[execution_id] = new_state
 
         if schedule:
             original_next = set(execution.nodes_out)
@@ -214,11 +229,11 @@ class Runtime:
     ) -> str:
         """Start a new session with the given initial node and state."""
         session = Session(session_id=str(uuid.uuid4()))
-        if initial_state is not None:
-            session.initial_state = initial_state
-            self.session_states[session.session_id] = initial_state
-
         initial_execution = Execution(initial_node)
+        if initial_state is None:
+            initial_state = {}
+        session.states[initial_execution.exec_id] = initial_state
+
         end_execution = Execution(END)
 
         session.add_node(initial_execution)
@@ -234,8 +249,6 @@ class Runtime:
         """Clean up a completed session."""
         if session_id in self.sessions:
             del self.sessions[session_id]
-        if session_id in self.session_states:
-            del self.session_states[session_id]
         logger.info("Cleaned up session %s", session_id)
 
     def visualize_graph(self, session: Session):

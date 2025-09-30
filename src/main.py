@@ -1,10 +1,19 @@
 # from collections import deque
+import logging
 import queue
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Set, Tuple, Union
 
 from graphviz import Digraph
+
+# Set up logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # Type aliases for clarity
 Node = Callable[
@@ -50,23 +59,23 @@ def Y():
 
 
 def default_merge():
-    print("we are in MERGE")
+    logger.info("we are in MERGE")
     return None, None
 
 
 def A():
-    print("we are in A")
+    logger.info("we are in A")
     # return Parallel(X, Y)
     return None, None
 
 
 def B():
-    print("we are in B")
+    logger.info("we are in B")
     return None, None
 
 
 def HEAD():
-    print("we are in head")
+    logger.info("we are in head")
     # return {}, A
     # return ({}, Sequence(A, B))
     return ({}, Parallel(A, B))
@@ -128,7 +137,7 @@ class Runtime:
         self.session_states: Dict[str, Dict[str, Any]] = {}
 
     def parse_schedule(self, schedule, session: Session):
-        print("adding schedule", schedule)
+        logger.info("adding schedule %s", schedule)
         if isinstance(schedule, Sequence):
             executions = []
             for node in schedule.items:
@@ -164,7 +173,7 @@ class Runtime:
         execution = session.graph[execution_id]
 
         if execution.node == END:
-            print(f"Session {session_id} is done!!")
+            logger.info("Session %s is done!!", session_id)
             self.visualize_graph(session)
             session.completed = True
             self.cleanup_session(session_id)
@@ -227,7 +236,7 @@ class Runtime:
             del self.sessions[session_id]
         if session_id in self.session_states:
             del self.session_states[session_id]
-        print(f"Cleaned up session {session_id}")
+        logger.info("Cleaned up session %s", session_id)
 
     def visualize_graph(self, session: Session):
         """Visualize the execution graph for a specific session."""
@@ -257,12 +266,14 @@ class Runtime:
                     session_id in self.sessions
                     and not self.sessions[session_id].completed
                 ):
-                    print(f"Executing node {execution_id} for session {session_id}")
+                    logger.info(
+                        "Executing node %s for session %s", execution_id, session_id
+                    )
                     self.execute_node(execution_id, session_id)
             except queue.Empty:
                 # Check if all sessions are completed
                 if not self.sessions:
-                    print("All sessions completed. Runtime shutting down.")
+                    logger.info("All sessions completed. Runtime shutting down.")
                     break
                 continue
 
@@ -273,7 +284,7 @@ if __name__ == "__main__":
 
     # Start a new session
     session_id = runtime.start_session(HEAD, {})
-    print(f"Started session: {session_id}")
+    logger.info("Started session: %s", session_id)
 
     # Run the runtime
     runtime.run()

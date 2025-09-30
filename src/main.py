@@ -98,103 +98,140 @@ class Execution:
         return self.node()
 
 
-class Runtime:
-    # TODO: fetch node from graph by ID
+@dataclass
+class Session:
+    """Represents a single execution session with its own graph and state."""
 
+    session_id: str
+    graph: Dict[str, Execution] = field(default_factory=dict)
+    initial_state: Dict[str, Any] = field(default_factory=dict)
+    completed: bool = False
+
+    def __post_init__(self):
+        if not self.session_id:
+            self.session_id = str(uuid.uuid4())
+
+
+class Runtime:
     def __init__(self):
         self.ready_queue = queue.Queue()
-        self.graph = {}
+        self.sessions: Dict[str, Session] = {}
+        self.session_states: Dict[str, Dict[str, Any]] = {}
 
-    def parse_schedule(self, schedule):
+    def parse_schedule(self, schedule, session: Session):
         print("adding schedule", schedule)
         if isinstance(schedule, Sequence):
             executions = []
             for node in schedule.items:
-                starts, end = self.parse_schedule(node)
+                starts, end = self.parse_schedule(node, session)
                 if executions:
                     for start in starts:
-                        self.add_edge(executions[-1], start)
+                        self.add_edge(executions[-1], start, session)
                 executions.append(starts)
                 executions.append(end)
             return executions[0], executions[-1]
         elif isinstance(schedule, Parallel):
             merge = Execution(default_merge)
-            self.add_node(merge)
+            self.add_node(merge, session)
             starts = []
             for node in schedule.items:
-                new_starts, end = self.parse_schedule(node)
-                # self.add_edge(current, start)
-                self.add_edge(end, merge.exec_id)
+                new_starts, end = self.parse_schedule(node, session)
+                self.add_edge(end, merge.exec_id, session)
                 for start in new_starts:
-                    # print("addign node from end of parallel child to merge", start, end)
                     starts.append(start)
             return starts, merge.exec_id
         else:
             # single node
             execution = Execution(schedule)
-            self.add_node(execution)
+            self.add_node(execution, session)
             return [execution.exec_id], execution.exec_id
 
-    def execute_node(self, execution_id):
-        execution = self.graph[execution_id]
+    def add_node(self, node: Execution, session: Session):
+        session.graph[node.exec_id] = node
+
+    def add_edge(self, start: str, end: str, session: Session):
+        session.graph[start].nodes_out.add(end)
+        session.graph[end].nodes_in.add(start)
+
+    def get_nodes_in_executions(self, node_id: str, session: Session):
+        in_ids = session.graph[node_id].nodes_in
+        return [session.graph[i] for i in in_ids]
+
+    def execute_node(self, execution_id: str, session_id: str):
+        session = self.sessions[session_id]
+        execution = session.graph[execution_id]
+
         if execution.node == END:
-            print("this session is done!!")
-            self.visualize_graph()
+            print(f"Session {session_id} is done!!")
+            self.visualize_graph(session)
+            session.completed = True
+            self.cleanup_session(session_id)
             return
-        # original_next.nodes_in.remove(execution_id)
-        # if it's Parallel, just update queue
-        # if isinstance(execution, Parallel):
-        # ok we know that node finished
-        state, schedule = execution()
+
+        # Get current state for this session
+        state = self.session_states.get(session_id, {})
+
+        # Execute the node
+        new_state, schedule = execution()
         execution.done = True
+
+        # Update session state
+        if new_state:
+            self.session_states[session_id] = new_state
+
         if schedule:
-            # assert len(execution.nodes_out) == 0
             original_next = set(execution.nodes_out)
-            print("original next", original_next)
-            starts, end = self.parse_schedule(schedule)
-            self.graph[end].nodes_out = original_next
+            starts, end = self.parse_schedule(schedule, session)
+            session.graph[end].nodes_out = original_next
             execution.nodes_out = starts
-            print("returned schedule", starts, end)
+
             for start in starts:
-                self.ready_queue.put(start)
+                self.ready_queue.put((start, session_id))
         else:
             for next_id in execution.nodes_out:
-                # TODO: check if all dependencies are met
-                print(
-                    f"checking if\n\t{next_id}\n\t{self.graph[next_id]}\n\tis ready\n"
-                )
                 ready = True
-                for dep in self.get_nodes_in_executions(next_id):
+                for dep in self.get_nodes_in_executions(next_id, session):
                     if not dep.done:
                         ready = False
-                        print("NO")
+                        break
+
                 if ready:
-                    print("YES")
-                    self.ready_queue.put(next_id)
+                    self.ready_queue.put((next_id, session_id))
 
-    def generate_id(self) -> str:
-        return str(uuid.uuid4())[:8]  # Short UUID for demo
+    def start_session(
+        self, initial_node: Node, initial_state: Dict[str, Any] = None
+    ) -> str:
+        """Start a new session with the given initial node and state."""
+        session = Session(session_id=str(uuid.uuid4()))
+        if initial_state is not None:
+            session.initial_state = initial_state
+            self.session_states[session.session_id] = initial_state
 
-    def crate_session_terminal(self, start):
-        return {
-            "node": End,
-            "inputs": [start],
-        }
+        initial_execution = Execution(initial_node)
+        end_execution = Execution(END)
 
-    def add_edge(self, start, end):
-        self.graph[start].nodes_out.add(end)
-        self.graph[end].nodes_in.add(start)
+        self.add_node(initial_execution, session)
+        self.add_node(end_execution, session)
+        self.add_edge(initial_execution.exec_id, end_execution.exec_id, session)
 
-    def add_node(self, node):
-        self.graph[node.exec_id] = node
+        self.sessions[session.session_id] = session
+        self.ready_queue.put((initial_execution.exec_id, session.session_id))
 
-    def get_nodes_in_executions(self, node_id):
-        in_ids = self.graph[node_id].nodes_in
-        return [self.graph[i] for i in in_ids]
+        return session.session_id
 
-    def visualize_graph(self):
-        dot = Digraph(comment="Execution Graph")
-        for exec_id, execution in self.graph.items():
+    def cleanup_session(self, session_id: str):
+        """Clean up a completed session."""
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+        if session_id in self.session_states:
+            del self.session_states[session_id]
+        print(f"Cleaned up session {session_id}")
+
+    def visualize_graph(self, session: Session):
+        """Visualize the execution graph for a specific session."""
+        dot = Digraph(comment=f"Execution Graph - Session {session.session_id[:8]}")
+
+        for exec_id, execution in session.graph.items():
             node_name = (
                 execution.node.__name__
                 if callable(execution.node)
@@ -202,30 +239,39 @@ class Runtime:
             )
             dot.node(exec_id, f"{node_name}\n({exec_id[:8]})")
 
-        for exec_id, execution in self.graph.items():
+        for exec_id, execution in session.graph.items():
             for out_id in execution.nodes_out:
                 dot.edge(exec_id, out_id)
 
-        dot.render("execution_graph", view=True)
+        filename = f"execution_graph_{session.session_id[:8]}"
+        dot.render(filename, view=True)
 
-    def add_initial(self, initial_node):
-        initial_execution = Execution(initial_node)
-        end_execution = Execution(END)
-        self.add_node(initial_execution)
-        self.add_node(end_execution)
-        self.add_edge(initial_execution.exec_id, end_execution.exec_id)
-        self.ready_queue.put(initial_execution.exec_id)
-        # ["state"] = initial_state
-        # create endge from initial to edge
-
-    def run(self, initial_state, initial_node):
-        self.add_initial(initial_node)
+    def run(self):
+        """Main runtime loop that processes ready nodes from all sessions."""
         while True:
-            next_node = self.ready_queue.get()
-            print("@main loop next node", next_node)
-            print("executing", next_node, self.graph[next_node].node)
-            self.execute_node(next_node)
+            try:
+                execution_id, session_id = self.ready_queue.get(timeout=1.0)
+                if (
+                    session_id in self.sessions
+                    and not self.sessions[session_id].completed
+                ):
+                    print(f"Executing node {execution_id} for session {session_id}")
+                    self.execute_node(execution_id, session_id)
+            except queue.Empty:
+                # Check if all sessions are completed
+                if not self.sessions:
+                    print("All sessions completed. Runtime shutting down.")
+                    break
+                continue
 
 
-runtime = Runtime()
-runtime.run({}, HEAD)
+# Example usage:
+if __name__ == "__main__":
+    runtime = Runtime()
+
+    # Start a new session
+    session_id = runtime.start_session(HEAD, {})
+    print(f"Started session: {session_id}")
+
+    # Run the runtime
+    runtime.run()

@@ -72,7 +72,17 @@ def HEAD():
     return ({}, Parallel(A, B))
 
 
-END = object()
+class EndObject:
+    """Special object to represent the end of execution."""
+
+    def __str__(self):
+        return "END"
+
+    def __repr__(self):
+        return "END"
+
+
+END = EndObject()
 
 
 @dataclass

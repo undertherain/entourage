@@ -173,7 +173,7 @@ class Runtime:
         execution = session.graph[execution_id]
 
         if execution.node == END:
-            logger.info("Session %s is done!!", session_id)
+            logger.info("🏁 Session %s is done!!", session_id)
             self.visualize_graph(session)
             session.completed = True
             self.cleanup_session(session_id)
@@ -284,7 +284,7 @@ if __name__ == "__main__":
 
     # Start a new session
     session_id = runtime.start_session(HEAD, {})
-    logger.info("Started session: %s", session_id)
+    logger.info("🚀 Started session: %s", session_id)
 
     # Run the runtime
     runtime.run()

@@ -111,6 +111,15 @@ class Session:
         if not self.session_id:
             self.session_id = str(uuid.uuid4())
 
+    def add_node(self, node: Execution):
+        """Add a node to the session's execution graph."""
+        self.graph[node.exec_id] = node
+
+    def add_edge(self, start: str, end: str):
+        """Add an edge between two nodes in the session's execution graph."""
+        self.graph[start].nodes_out.add(end)
+        self.graph[end].nodes_in.add(start)
+
 
 class Runtime:
     def __init__(self):
@@ -126,32 +135,25 @@ class Runtime:
                 starts, end = self.parse_schedule(node, session)
                 if executions:
                     for start in starts:
-                        self.add_edge(executions[-1], start, session)
+                        session.add_edge(executions[-1], start)
                 executions.append(starts)
                 executions.append(end)
             return executions[0], executions[-1]
         elif isinstance(schedule, Parallel):
             merge = Execution(default_merge)
-            self.add_node(merge, session)
+            session.add_node(merge)
             starts = []
             for node in schedule.items:
                 new_starts, end = self.parse_schedule(node, session)
-                self.add_edge(end, merge.exec_id, session)
+                session.add_edge(end, merge.exec_id)
                 for start in new_starts:
                     starts.append(start)
             return starts, merge.exec_id
         else:
             # single node
             execution = Execution(schedule)
-            self.add_node(execution, session)
+            session.add_node(execution)
             return [execution.exec_id], execution.exec_id
-
-    def add_node(self, node: Execution, session: Session):
-        session.graph[node.exec_id] = node
-
-    def add_edge(self, start: str, end: str, session: Session):
-        session.graph[start].nodes_out.add(end)
-        session.graph[end].nodes_in.add(start)
 
     def get_nodes_in_executions(self, node_id: str, session: Session):
         in_ids = session.graph[node_id].nodes_in
@@ -210,9 +212,9 @@ class Runtime:
         initial_execution = Execution(initial_node)
         end_execution = Execution(END)
 
-        self.add_node(initial_execution, session)
-        self.add_node(end_execution, session)
-        self.add_edge(initial_execution.exec_id, end_execution.exec_id, session)
+        session.add_node(initial_execution)
+        session.add_node(end_execution)
+        session.add_edge(initial_execution.exec_id, end_execution.exec_id)
 
         self.sessions[session.session_id] = session
         self.ready_queue.put((initial_execution.exec_id, session.session_id))

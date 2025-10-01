@@ -462,5 +462,3 @@ class CLI:
 load_dotenv()
 cli = CLI(config=APP_CONFIG)
 cli.run()
-cli.run()
-cli.run()

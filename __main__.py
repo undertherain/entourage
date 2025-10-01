@@ -222,14 +222,20 @@ class MCPTool(Tool):
         return self._schema
 
     def execute(self, **kwargs):
+        print("!!!!!!!!!!!!!!!!!!! calling tool")
+        return self._proxy.call_tool(**kwargs)
+
+
+class MyMCP:
+    def __init__(self):
         pass
 
 
-async def get_mcp_tools(server_url: str) -> List[Any]:
+async def get_mcp_tools(server_config):
     """Connects to an MCP server and fetches its available tools."""
     try:
-        print(f"-> Connecting to MCP server at {server_url}...")
-        async with MCPClient(server_url) as client:
+        # print(f"-> Connecting to MCP server at {server_url}...")
+        async with MCPClient(server_config) as client:
             mcp_tools = await client.list_tools()
         # tool_names = [t.schema["function"]["name"] for t in mcp_tools]
         tool_names = [t.name for t in mcp_tools]
@@ -294,6 +300,7 @@ class Agent:
                 )
 
                 function_args = json.loads(tool_call.function.arguments)
+                print("ARGS:", function_args)
                 function_response = function_to_call(**function_args)
 
                 tool_message = {
@@ -380,8 +387,13 @@ class CLI:
         tavily_tool = TavilySearchTool()
         memory_tool = MemoryTool(self.memory_db)
 
-        mcp_server_url = "http://localhost:8000/mcp"
-        mcp_tools = asyncio.run(get_mcp_tools(mcp_server_url))
+        # mcp_server_url = "http://localhost:8000/mcp"
+        mcp_config = {
+            "mcpServers": {
+                "server_fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}
+            }
+        }
+        mcp_tools = asyncio.run(get_mcp_tools(mcp_config))
         all_tools = [tavily_tool, memory_tool] + mcp_tools
 
         self.agent = Agent(

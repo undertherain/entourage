@@ -60,7 +60,7 @@ def Y():
 
 class AgentWithTools:
     def __init__(self, tools):
-        self.tools = tool
+        self.tools = tools
 
     def __call__(self, state):
         print("THIS IS AGENT WITH TOOLS, simulating tool invocation")
@@ -72,11 +72,13 @@ class AgentWithTools:
             "role": "assistant",
             "tool_calls": "call some tools",
         }
-        state.message.append(dummy_tool_invocation)
-        print("MESSAGES:", len(state["messages"]))
+        state["messages"].append(dummy_tool_invocation)
+        # for now let's assyme a single tool call. let's explicitly assert it.
+        # print("MESSAGES:", len(state["messages"]))
         if len(state["messages"]) < 3:
             print("scheduling a tool")
-            return (state, self.tools[0])
+            return (state, Sequence(self.tools[0], self))
+        print("simulating tool is done")
         return state, None
         # if last response is tool result: call LLM again
 
@@ -87,12 +89,12 @@ class AgentWithTools:
 
 class Tool:
     def __call__(self, state):
-        print("simulating tool call")
+        print("simulating tool call, got state", state)
         tool_message = {
             "role": "tool",
-            "tool_call_id": tool_call.id,
-            "name": function_name,
-            "content": function_response,
+            "tool_call_id": 1,  # tool_call.id,
+            "name": "dummy function",  # function_name,
+            "content": "function_response",
         }
         state["messages"].append(tool_message)
         return state, None
@@ -127,8 +129,8 @@ def HEAD(
 ) -> Tuple[Dict[str, Any], Union[Sequence, Parallel]]:
     logger.info("we are in head")
     # return {}, A
-    # return ({}, Sequence(A, B))
-    return ({}, Parallel(A, B))
+    return ({}, Sequence(A, B))
+    # return ({}, Parallel(A, B))
 
 
 class EndObject:
@@ -223,12 +225,13 @@ class Runtime:
 
         if execution.node == END:
             logger.info("🏁 Session %s is done!!", session_id)
-            self.visualize_graph(session)
+            # self.visualize_graph(session)
             session.completed = True
             self.cleanup_session(session_id)
             return
 
         # Get input states from parent nodes
+        print("collecting inputs from ", execution.nodes_in)
         input_states = [
             session.states[in_id]
             for in_id in execution.nodes_in
@@ -247,12 +250,19 @@ class Runtime:
 
         # Store the output state for this execution
         if new_state is not None:
+            # print("saving returned state for ", execution_id, "as", new_state)
             session.states[execution_id] = new_state
 
         if schedule:
             original_next = set(execution.nodes_out)
+            # print(original_next)
             starts, end = self.parse_schedule(schedule, session)
             session.graph[end].nodes_out = original_next
+            for i in list(original_next):
+                session.graph[i].nodes_in.remove(execution_id)
+                session.graph[i].nodes_in.add(end)
+            for i in starts:
+                session.graph[i].nodes_in = {execution_id}
             execution.nodes_out = starts
 
             for start in starts:
@@ -312,8 +322,8 @@ class Runtime:
             for out_id in execution.nodes_out:
                 dot.edge(exec_id, out_id)
 
-        # filename = f"execution_graph_{session.session_id[:8]}"
-        # dot.render(filename, view=True)
+        filename = f"execution_graph_{session.session_id[:8]}"
+        dot.render(filename, view=True)
 
     def run(self):
         """Main runtime loop that processes ready nodes from all sessions."""

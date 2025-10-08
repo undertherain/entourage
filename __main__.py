@@ -138,7 +138,7 @@ class Tool(ABC):
         pass
 
     @abstractmethod
-    def execute(self, **kwargs):
+    async def execute(self, **kwargs):
         pass
 
 
@@ -164,7 +164,7 @@ class TavilySearchTool(Tool):
     def schema(self):
         return self._schema
 
-    def execute(self, query: str):
+    async def execute(self, query: str):
         try:
             print(f"-> Searching: '{query}'")
             return json.dumps(
@@ -199,15 +199,16 @@ class MemoryTool(Tool):
     def schema(self):
         return self._schema
 
-    def execute(self, fact_to_remember: str):
+    async def execute(self, fact_to_remember: str):
         print(f"-> Remembering: '{fact_to_remember}'")
         self.memory_db.add(fact_to_remember)
         return f"Success: Fact saved."
 
 
 class MCPTool(Tool):
-    def __init__(self, proxy):
+    def __init__(self, client, proxy):
         self._proxy = proxy
+        self.client = client
         self._schema = {
             "type": "function",
             "function": {
@@ -221,33 +222,10 @@ class MCPTool(Tool):
     def schema(self):
         return self._schema
 
-    def execute(self, **kwargs):
-        print("!!!!!!!!!!!!!!!!!!! calling tool")
-        return self._proxy.call_tool(**kwargs)
-
-
-class MyMCP:
-    def __init__(self):
-        pass
-
-
-async def get_mcp_tools(server_config):
-    """Connects to an MCP server and fetches its available tools."""
-    try:
-        # print(f"-> Connecting to MCP server at {server_url}...")
-        async with MCPClient(server_config) as client:
-            mcp_tools = await client.list_tools()
-        # tool_names = [t.schema["function"]["name"] for t in mcp_tools]
-        tool_names = [t.name for t in mcp_tools]
-        print(f"-> Successfully loaded {len(mcp_tools)} tools: {', '.join(tool_names)}")
-        tools = [MCPTool(t) for t in mcp_tools]
-        return tools
-    except requests.exceptions.RequestException as e:
-        print(f"Warning: Could not connect to MCP server at {server_url}. Error: {e}")
-        return []
-    except Exception as e:
-        print(f"Warning: An unexpected error occurred while fetching MCP tools: {e}")
-        return []
+    async def execute(self, **kwargs):
+        result = await self.client.call_tool(self._proxy.name, kwargs)
+        # print("MCP returned:", result)
+        return result.content[0].text
 
 
 class Agent:
@@ -266,7 +244,7 @@ class Agent:
                 tool_name = tool.schema["function"]["name"]
                 self.available_tools[tool_name] = tool.execute
 
-    def __call__(self, prompt):
+    async def __call__(self, prompt):
         # The agent no longer adds the system prompt; it's assumed to be in the history
         user_message = {"role": "user", "content": prompt}
         self.history.append(user_message)
@@ -300,9 +278,10 @@ class Agent:
                 )
 
                 function_args = json.loads(tool_call.function.arguments)
+                print("TOOL:", function_name)
                 print("ARGS:", function_args)
-                function_response = function_to_call(**function_args)
-
+                function_response = await function_to_call(**function_args)
+                # print(function_response)
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -313,21 +292,16 @@ class Agent:
 
 
 class CLI:
-    # --- Modified: CLI now uses ChatHistory ---
     def __init__(self, config: PersonaConfig):
         self.config = config
-        # --- New/Modified: Group all agent files under a single directory ---
         agent_name_lower = self.config.agent_name.lower()
 
-        # 1. Define a single base directory for the agent
         agent_base_dir = Path(os.path.expanduser(f"~/.entourage/{agent_name_lower}"))
         agent_base_dir.mkdir(parents=True, exist_ok=True)
 
-        # 2. Place chat history in a 'chats' subdirectory within it
         self.chat_dir = agent_base_dir / "chats"
         self.chat_dir.mkdir(parents=True, exist_ok=True)
 
-        # 3. Place the memory file directly within the agent's base directory
         memory_path = agent_base_dir / "memory.txt"
         self.memory_db = MemoryDB(memory_path)
 
@@ -336,6 +310,15 @@ class CLI:
 
         # self._load_latest_chat()
         self._new_chat()
+        self._print_history()
+
+    async def setup(self):
+        mcp_config = {
+            "mcpServers": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}}
+        }
+        obj = MCPClient(mcp_config)
+        self.mcp_client = await obj.__aenter__()
+        await self._create_agent()
 
     def _load_latest_chat(self):
         """Finds the latest chat and initializes history and agent for it."""
@@ -349,10 +332,7 @@ class CLI:
             self._new_chat()
             return  # _new_chat handles agent creation
 
-        self._create_agent()
-        self._print_history()
-
-    def _create_agent(self):
+    async def _create_agent(self):
         # --- Modified: Prompts are now built from the config object ---
         current_messages = self.history.get_messages()
         if not current_messages or current_messages[0].get("role") != "system":
@@ -388,12 +368,7 @@ class CLI:
         memory_tool = MemoryTool(self.memory_db)
 
         # mcp_server_url = "http://localhost:8000/mcp"
-        mcp_config = {
-            "mcpServers": {
-                "server_fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}
-            }
-        }
-        mcp_tools = asyncio.run(get_mcp_tools(mcp_config))
+        mcp_tools = await self.get_mcp_tools()
         all_tools = [tavily_tool, memory_tool] + mcp_tools
 
         self.agent = Agent(
@@ -441,7 +416,30 @@ class CLI:
 
         print("-" * 40 + "\n")
 
-    def run(self):
+    async def get_mcp_tools(self):
+        """Connects to an MCP server and fetches its available tools."""
+        try:
+            # print(f"-> Connecting to MCP server at {server_url}...")
+            mcp_tools = await self.mcp_client.list_tools()
+            # tool_names = [t.schema["function"]["name"] for t in mcp_tools]
+            tool_names = [t.name for t in mcp_tools]
+            print(
+                f"-> Successfully loaded {len(mcp_tools)} tools: {', '.join(tool_names)}"
+            )
+            tools = [MCPTool(self.mcp_client, t) for t in mcp_tools]
+            return tools
+        except requests.exceptions.RequestException as e:
+            print(
+                f"Warning: Could not connect to MCP server at {server_url}. Error: {e}"
+            )
+            return []
+        except Exception as e:
+            print(
+                f"Warning: An unexpected error occurred while fetching MCP tools: {e}"
+            )
+            return []
+
+    async def run(self):
         while True:
             print("> ", end="")
             try:
@@ -455,10 +453,15 @@ class CLI:
                 self._new_chat()
                 continue
 
-            res = self.agent(user_message)
+            res = await self.agent(user_message)
             print(f"\n{name}:\n{res}\n")
 
 
-load_dotenv()
-cli = CLI(config=APP_CONFIG)
-cli.run()
+async def main():
+    load_dotenv()
+    cli = CLI(config=APP_CONFIG)
+    await cli.setup()
+    await cli.run()
+
+
+asyncio.run(main())

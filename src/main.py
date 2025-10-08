@@ -58,6 +58,50 @@ def Y():
     pass
 
 
+class AgentWithTools:
+    def __init__(self, tools):
+        self.tools = tool
+
+    def __call__(self, state):
+        print("THIS IS AGENT WITH TOOLS, simulating tool invocation")
+        print("got state:", state)
+        # expect messages in state["messages"]
+        # if last response is user message: call llm
+        # if last response is tool call: call all tools amd loop back to itself
+        dummy_tool_invocation = {
+            "role": "assistant",
+            "tool_calls": "call some tools",
+        }
+        state.message.append(dummy_tool_invocation)
+        print("MESSAGES:", len(state["messages"]))
+        if len(state["messages"]) < 3:
+            print("scheduling a tool")
+            return (state, self.tools[0])
+        return state, None
+        # if last response is tool result: call LLM again
+
+    @property
+    def __name__(self):
+        return self.__class__.__name__
+
+
+class Tool:
+    def __call__(self, state):
+        print("simulating tool call")
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": function_name,
+            "content": function_response,
+        }
+        state["messages"].append(tool_message)
+        return state, None
+
+    @property
+    def __name__(self):
+        return self.__class__.__name__
+
+
 def default_merge(state: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], None]:
     logger.info("we are in MERGE with states: %s", state)
     merged_state = {}
@@ -232,7 +276,8 @@ class Runtime:
         initial_execution = Execution(initial_node)
         if initial_state is None:
             initial_state = {}
-        session.states[initial_execution.exec_id] = initial_state
+        initial_execution.nodes_in = ["initial"]
+        session.states["initial"] = initial_state
 
         end_execution = Execution(END)
 
@@ -267,8 +312,8 @@ class Runtime:
             for out_id in execution.nodes_out:
                 dot.edge(exec_id, out_id)
 
-        filename = f"execution_graph_{session.session_id[:8]}"
-        dot.render(filename, view=True)
+        # filename = f"execution_graph_{session.session_id[:8]}"
+        # dot.render(filename, view=True)
 
     def run(self):
         """Main runtime loop that processes ready nodes from all sessions."""
@@ -296,7 +341,12 @@ if __name__ == "__main__":
     runtime = Runtime()
 
     # Start a new session
-    session_id = runtime.start_session(HEAD, {})
+    tool = Tool()
+    agent = AgentWithTools([tool])
+    initial_state = {
+        "messages": [{"role": "user", "content": "what's the weather in Tokyo?"}]
+    }
+    session_id = runtime.start_session(agent, initial_state)
     logger.info("🚀 Started session: %s", session_id)
 
     # Run the runtime

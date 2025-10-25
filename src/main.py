@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, List, Set, Tuple, Union
 
 from graphviz import Digraph
 
-# Set up logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
@@ -15,7 +14,6 @@ formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-# Type aliases for clarity
 Node = Callable[
     [Union[Dict[str, Any], List[Dict[str, Any]]]], Tuple[Dict[str, Any], Any]
 ]  # Node: (state) -> (new_state, schedule)
@@ -46,16 +44,9 @@ class Parallel(ControlFlow):
         return f"Parallel execution of {self.items}"
 
 
+# MEMO: add support for extensions like
 # .with_timeout(10)
 # .with_merge(my merge)
-
-
-def X():
-    pass
-
-
-def Y():
-    pass
 
 
 class AgentWithTools:

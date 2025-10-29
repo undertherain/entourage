@@ -5,7 +5,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Set, Tuple, Union
 
+from dotenv import load_dotenv
 from graphviz import Digraph
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -50,26 +52,41 @@ class Parallel(ControlFlow):
 
 
 class AgentWithTools:
-    def __init__(self, tools):
+    def __init__(self, model, tools):
+        self.model = model
         self.tools = tools
+        self.client = OpenAI()
 
     def __call__(self, state):
+
         print("THIS IS AGENT WITH TOOLS, simulating tool invocation")
         print("got state:", state)
-        # expect messages in state["messages"]
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=state["messages"],
+            # tools=self.tools_schemas if self.tools_schemas else None,
+            # tool_choice="auto",
+        )  # expect messages in state["messages"]
+        response_message = response.choices[0].message
+        state["messages"].append(response_message.model_dump())
         # if last response is user message: call llm
         # if last response is tool call: call all tools amd loop back to itself
-        dummy_tool_invocation = {
-            "role": "assistant",
-            "tool_calls": "call some tools",
-        }
-        state["messages"].append(dummy_tool_invocation)
+        # dummy_tool_invocation = {
+        #     "role": "assistant",
+        #     "tool_calls": "call some tools",
+        # }
+        if not response_message.tool_calls:
+            print("returning state:")
+            print(state)
+            return state, None
+        print("scheduling a tool")
+
+        # state["messages"].append(dummy_tool_invocation)
         # for now let's assyme a single tool call. let's explicitly assert it.
         # print("MESSAGES:", len(state["messages"]))
-        if len(state["messages"]) < 3:
-            print("scheduling a tool")
-            return (state, Sequence(self.tools[0], self))
-        print("simulating tool is done")
+        # if len(state["messages"]) < 3:
+        # return (state, Sequence(self.tools[0], self))
+        # print("simulating tool is done")
         return state, None
         # if last response is tool result: call LLM again
 
@@ -339,11 +356,12 @@ class Runtime:
 
 # Example usage:
 if __name__ == "__main__":
+    load_dotenv()
     runtime = Runtime()
 
     # Start a new session
     tool = Tool()
-    agent = AgentWithTools([tool])
+    agent = AgentWithTools("gpt-5-nano", [tool])
     initial_state = {
         "messages": [{"role": "user", "content": "what's the weather in Tokyo?"}]
     }

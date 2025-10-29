@@ -7,7 +7,8 @@ from typing import Any, Callable, Dict, List, Set, Tuple, Union
 
 from dotenv import load_dotenv
 from graphviz import Digraph
-from openai import OpenAI
+
+from utils import pprint
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -15,94 +16,11 @@ handler = logging.StreamHandler()
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
+import json
+
+from agent import AgentWithTools
+from flow import Node, Parallel, Sequence
 from tools import TavilySearchTool
-
-Node = Callable[
-    [Union[Dict[str, Any], List[Dict[str, Any]]]], Tuple[Dict[str, Any], Any]
-]  # Node: (state) -> (new_state, schedule)
-Schedule = Any  # Will be Sequence, Parallel, or Node
-
-
-class ControlFlow:
-    pass
-
-
-class Sequence(ControlFlow):
-    """Represents a sequential chain of nodes or sub-schedules."""
-
-    def __init__(self, *items: Union[Node, "Schedule"]):
-        self.items = items
-
-    def __repr__(self):
-        return f"Sequence of {self.items}"
-
-
-class Parallel(ControlFlow):
-    """Represents a fork-join: execute items in parallel, join results."""
-
-    def __init__(self, *items: Union[Node, "Schedule"]):
-        self.items = items
-
-    def __repr__(self):
-        return f"Parallel execution of {self.items}"
-
-
-# MEMO: add support for extensions like
-# .with_timeout(10)
-# .with_merge(my merge)
-
-
-class AgentWithTools:
-    def __init__(self, model, tools):
-        self.model = model
-        self.tools = tools
-        self.client = OpenAI()
-        self.tools_schemas = []
-        self.available_tools = {}
-        if tools:
-            for tool in tools:
-                self.tools_schemas.append(tool.schema)
-                tool_name = tool.schema["function"]["name"]
-                self.available_tools[tool_name] = tool.execute
-
-    def __call__(self, state):
-
-        print("Agent with tools, got state:", state)
-        if "tool_call_result" in state:
-            print("got fake tool result, exiting")
-            return state, None
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=state["messages"],
-            tools=self.tools_schemas,
-            # tools=self.tools_schemas if self.tools_schemas else None,
-            # tool_choice="auto",
-        )  # expect messages in state["messages"]
-        response_message = response.choices[0].message
-        state["messages"].append(response_message.model_dump())
-        # if last response is user message: call llm
-        # if last response is tool call: call all tools amd loop back to itself
-        # dummy_tool_invocation = {
-        #     "role": "assistant",
-        #     "tool_calls": "call some tools",
-        # }
-        if not response_message.tool_calls:
-            print("returning state:")
-            print(state)
-            return state, None
-        print("scheduling a tool")
-        print(response_message)
-        # state["messages"].append(dummy_tool_invocation)
-        # for now let's assyme a single tool call. let's explicitly assert it.
-        # print("MESSAGES:", len(state["messages"]))
-        # if len(state["messages"]) < 3:
-        return (state, Sequence(self.tools[0], self))
-        # print("simulating tool is done")
-        # if last response is tool result: call LLM again
-
-    @property
-    def __name__(self):
-        return self.__class__.__name__
 
 
 class Tool:

@@ -13,6 +13,8 @@ from fastmcp import Client as MCPClient
 from openai import OpenAI
 from tavily import TavilyClient
 
+from utils import pprint
+
 
 class PersonaConfig:
     """A single place to configure the assistant's persona."""

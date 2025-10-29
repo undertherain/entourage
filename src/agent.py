@@ -21,9 +21,9 @@ class AgentWithTools:
 
         print("Agent with tools, got state:")
         pprint(state)
-        if "tool_call_result" in state:
-            print("got fake tool result, exiting")
-            return state, None
+        # if "tool_call_result" in state:
+        #   print("got fake tool result, exiting")
+        #  return state, None
         response = self.client.chat.completions.create(
             model=self.model,
             messages=state["messages"],
@@ -40,8 +40,9 @@ class AgentWithTools:
         #     "tool_calls": "call some tools",
         # }
         if not response_message.tool_calls:
-            print("returning state:")
-            pprint(state)
+            print("agent done, returning state:")
+            # pprint(state)
+            print(state["messages"][-1]["content"])
             return state, None
         print("scheduling a tool")
         print(response_message)

@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 
 from tavily import TavilyClient
 
+from utils import pprint
+
 
 class Tool(ABC):
     @property
@@ -26,7 +28,15 @@ class Tool(ABC):
         tool_params = state["messages"][-1]["tool_calls"][0]
         print("calling tool as ", tool_params)
         tool_result = self.execute(**json.loads(tool_params["function"]["arguments"]))
-        state["tool_call_result"] = tool_result
+        print("tool returned")
+        pprint(tool_result)
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": tool_params["id"],
+            "name": tool_params["function"]["name"],
+            "content": tool_result,
+        }
+        state["messages"].append(tool_message)
         return state, None
 
 

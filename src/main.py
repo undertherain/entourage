@@ -15,6 +15,7 @@ handler = logging.StreamHandler()
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
+from tools import TavilySearchTool
 
 Node = Callable[
     [Union[Dict[str, Any], List[Dict[str, Any]]]], Tuple[Dict[str, Any], Any]
@@ -56,14 +57,24 @@ class AgentWithTools:
         self.model = model
         self.tools = tools
         self.client = OpenAI()
+        self.tools_schemas = []
+        self.available_tools = {}
+        if tools:
+            for tool in tools:
+                self.tools_schemas.append(tool.schema)
+                tool_name = tool.schema["function"]["name"]
+                self.available_tools[tool_name] = tool.execute
 
     def __call__(self, state):
 
-        print("THIS IS AGENT WITH TOOLS, simulating tool invocation")
-        print("got state:", state)
+        print("Agent with tools, got state:", state)
+        if "tool_call_result" in state:
+            print("got fake tool result, exiting")
+            return state, None
         response = self.client.chat.completions.create(
             model=self.model,
             messages=state["messages"],
+            tools=self.tools_schemas,
             # tools=self.tools_schemas if self.tools_schemas else None,
             # tool_choice="auto",
         )  # expect messages in state["messages"]
@@ -80,14 +91,13 @@ class AgentWithTools:
             print(state)
             return state, None
         print("scheduling a tool")
-
+        print(response_message)
         # state["messages"].append(dummy_tool_invocation)
         # for now let's assyme a single tool call. let's explicitly assert it.
         # print("MESSAGES:", len(state["messages"]))
         # if len(state["messages"]) < 3:
-        # return (state, Sequence(self.tools[0], self))
+        return (state, Sequence(self.tools[0], self))
         # print("simulating tool is done")
-        return state, None
         # if last response is tool result: call LLM again
 
     @property
@@ -360,7 +370,8 @@ if __name__ == "__main__":
     runtime = Runtime()
 
     # Start a new session
-    tool = Tool()
+    # tool = Tool()
+    tool = TavilySearchTool()
     agent = AgentWithTools("gpt-5-nano", [tool])
     initial_state = {
         "messages": [{"role": "user", "content": "what's the weather in Tokyo?"}]

@@ -13,7 +13,7 @@ from fastmcp import Client as MCPClient
 from openai import OpenAI
 from tavily import TavilyClient
 
-from utils import pprint
+from .utils import pprint
 
 
 class PersonaConfig:

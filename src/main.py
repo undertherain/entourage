@@ -65,8 +65,8 @@ def HEAD(
 ) -> Tuple[Dict[str, Any], Union[Sequence, Parallel]]:
     logger.info("we are in head")
     # return {}, A
-    return ({}, Sequence(A, B))
-    # return ({}, Parallel(A, B))
+    # return ({}, Sequence(A, B))
+    return ({}, Parallel(A, B))
 
 
 class EndObject:
@@ -161,7 +161,7 @@ class Runtime:
 
         if execution.node == END:
             logger.info("🏁 Session %s is done!!", session_id)
-            # self.visualize_graph(session)
+            self.visualize_graph(session)
             session.completed = True
             self.cleanup_session(session_id)
             return
@@ -294,8 +294,8 @@ if __name__ == "__main__":
     initial_state = {
         "messages": [{"role": "user", "content": "what's the weather in Tokyo?"}]
     }
-    session_id = runtime.start_session(agent, initial_state)
+    #session_id = runtime.start_session(agent, initial_state)
+    session_id = runtime.start_session(HEAD, initial_state)
     logger.info("🚀 Started session: %s", session_id)
-
-    # Run the runtime
     runtime.run()
+

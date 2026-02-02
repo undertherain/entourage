@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from tavily import TavilyClient
 
-from utils import pprint
+from .utils import pprint
 
 
 class Tool(ABC):

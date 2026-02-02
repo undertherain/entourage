@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Set, Tuple, Union
 from dotenv import load_dotenv
 from graphviz import Digraph
 
-from utils import pprint
+from .utils import pprint
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -18,9 +18,9 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 import json
 
-from agent import AgentWithTools
-from flow import Node, Parallel, Sequence
-from tools import TavilySearchTool
+from .agent import AgentWithTools
+from .flow import Node, Parallel, Sequence
+from .tools import TavilySearchTool
 
 
 class Tool:

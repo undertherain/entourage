@@ -1,7 +1,7 @@
 from openai import OpenAI
 
-from flow import Sequence
-from utils import pprint
+from .flow import Sequence
+from .utils import pprint
 
 
 class AgentWithTools:

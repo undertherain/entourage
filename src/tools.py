@@ -70,3 +70,34 @@ class TavilySearchTool(Tool):
             )
         except Exception as e:
             return f"Error: {e}"
+
+
+class MemoryTool(Tool):
+    def __init__(self, memory_db):
+        self.memory_db = memory_db
+        self._schema = {
+            "type": "function",
+            "function": {
+                "name": "save_user_memory",
+                "description": "Use to remember a fact about the user. Then, continue with the original request.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "fact_to_remember": {
+                            "type": "string",
+                            "description": "A concise fact to remember.",
+                        }
+                    },
+                    "required": ["fact_to_remember"],
+                },
+            },
+        }
+
+    @property
+    def schema(self):
+        return self._schema
+
+    def execute(self, fact_to_remember: str):
+        print(f"-> Remembering: '{fact_to_remember}'")
+        self.memory_db.add(fact_to_remember)
+        return f"Success: Fact saved."

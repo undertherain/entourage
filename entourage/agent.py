@@ -68,7 +68,7 @@ class AgentWithTools:
             # Ideally `self.available_tools` would store the instance itself, not just the execute method 
             # IF our tool execution logic (Sequence) expects a callable that takes state.
             
-            # Our `Tool` class in `src/tools.py` has a `__call__` method that handles state processing.
+            # Our `Tool` class in `entourage/tools.py` has a `__call__` method that handles state processing.
             # So if we pass the TOOL INSTANCE to Sequence, it will work.
             
             found_tool = next((t for t in self.tools if t.schema["function"]["name"] == function_name), None)

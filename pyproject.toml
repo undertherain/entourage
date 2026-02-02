@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "entourage"
+version = "0.1.0"
+description = "A graph-based agent framework"
+authors = [
+  { name="Entourage Team", email="entourage@example.com" },
+]
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "openai",
+    "graphviz",
+    "python-dotenv",
+    "tavily-python",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/example/entourage"
+"Bug Tracker" = "https://github.com/example/entourage/issues"

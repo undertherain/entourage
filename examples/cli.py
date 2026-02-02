@@ -4,14 +4,14 @@ import sys
 from pathlib import Path
 
 # Add src to path so we can import modules
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from dotenv import load_dotenv
-from src.runtime import Runtime
-from src.agent import AgentWithTools
-from src.tools import TavilySearchTool, MemoryTool
-from src.memory import ChatHistory, MemoryDB
-from src.flow import Sequence
+from entourage.runtime import Runtime
+from entourage.agent import AgentWithTools
+from entourage.tools import TavilySearchTool, MemoryTool
+from entourage.memory import ChatHistory, MemoryDB
+from entourage.flow import Sequence
 
 # Configuration
 class PersonaConfig:

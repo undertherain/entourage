@@ -258,8 +258,14 @@ class Runtime:
             for out_id in execution.nodes_out:
                 dot.edge(exec_id, out_id)
 
-        filename = f"execution_graph_{session.session_id[:8]}"
-        dot.render(filename, view=True)
+        # Create logs directory if it doesn't exist
+        import os
+        if not os.path.exists("logs"):
+            os.makedirs("logs")
+
+        filename = os.path.join("logs", f"execution_graph_{session.session_id[:8]}")
+        # dot.render(filename, view=True)
+        dot.render(filename, view=False)
 
     def run(self):
         """Main runtime loop that processes ready nodes from all sessions."""

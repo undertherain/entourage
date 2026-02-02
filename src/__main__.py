@@ -294,8 +294,8 @@ if __name__ == "__main__":
     initial_state = {
         "messages": [{"role": "user", "content": "what's the weather in Tokyo?"}]
     }
-    #session_id = runtime.start_session(agent, initial_state)
-    session_id = runtime.start_session(HEAD, initial_state)
+    session_id = runtime.start_session(agent, initial_state)
+    #session_id = runtime.start_session(HEAD, initial_state)
     logger.info("🚀 Started session: %s", session_id)
     runtime.run()
 

@@ -61,9 +61,10 @@ class Session:
 
 
 class Runtime:
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         self.ready_queue = queue.Queue()
         self.sessions: Dict[str, Session] = {}
+        self.debug = debug
 
     def parse_schedule(self, schedule, session: Session):
         # logger.info("adding schedule %s", schedule)
@@ -110,8 +111,9 @@ class Runtime:
         execution = session.graph[execution_id]
 
         if execution.node == END:
-            logger.info("🏁 Session %s is done!!", session_id)
-            self.visualize_graph(session)
+            if self.debug:
+                logger.info("🏁 Session %s is done!!", session_id)
+                self.visualize_graph(session)
             session.completed = True
             self.cleanup_session(session_id)
             return

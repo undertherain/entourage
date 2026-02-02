@@ -1,10 +1,13 @@
 import json
 import os
+import logging
 from abc import ABC, abstractmethod
 
 from tavily import TavilyClient
 
 from .utils import pprint
+
+logger = logging.getLogger(__name__)
 
 
 class Tool(ABC):
@@ -22,14 +25,16 @@ class Tool(ABC):
         return self.__class__.__name__
 
     def __call__(self, state):
-        print("CALLING TOOL STUB")
-        # print("got state", state)
+        logger.debug("CALLING TOOL STUB")
+        # logger.debug("got state %s", state)
         # for now assume single tool call and that it is in the state
         tool_params = state["messages"][-1]["tool_calls"][0]
-        print("calling tool as ", tool_params)
+        logger.debug("calling tool as %s", tool_params)
+        print(f"[System] Calling tool: {tool_params['function']['name']}")
         tool_result = self.execute(**json.loads(tool_params["function"]["arguments"]))
-        print("tool returned")
-        pprint(tool_result)
+        logger.debug("tool returned")
+        # pprint(tool_result) # avoiding pprint in logs
+        logger.debug(tool_result)
         tool_message = {
             "role": "tool",
             "tool_call_id": tool_params["id"],
@@ -64,7 +69,7 @@ class TavilySearchTool(Tool):
 
     def execute(self, query: str):
         try:
-            print(f"-> Searching: '{query}'")
+            logger.info(f"-> Searching: '{query}'")
             return json.dumps(
                 self.client.search(query, search_depth="basic")["results"]
             )
@@ -98,6 +103,6 @@ class MemoryTool(Tool):
         return self._schema
 
     def execute(self, fact_to_remember: str):
-        print(f"-> Remembering: '{fact_to_remember}'")
+        logger.info(f"-> Remembering: '{fact_to_remember}'")
         self.memory_db.add(fact_to_remember)
         return f"Success: Fact saved."

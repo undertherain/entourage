@@ -5,9 +5,10 @@ from .utils import pprint
 
 
 class AgentWithTools:
-    def __init__(self, model, tools):
+    def __init__(self, model, tools, debug=False):
         self.model = model
         self.tools = tools
+        self.debug = debug
         self.client = OpenAI()
         self.tools_schemas = []
         self.available_tools = {}
@@ -19,8 +20,9 @@ class AgentWithTools:
 
     def __call__(self, state):
 
-        print("Agent with tools, got state:")
-        pprint(state)
+        if self.debug:
+            print("Agent with tools, got state:")
+            pprint(state)
         # if "tool_call_result" in state:
         #   print("got fake tool result, exiting")
         #  return state, None
@@ -40,12 +42,14 @@ class AgentWithTools:
         #     "tool_calls": "call some tools",
         # }
         if not response_message.tool_calls:
-            print("agent done, returning state:")
-            # pprint(state)
-            print(state["messages"][-1]["content"])
+            if self.debug:
+                print("agent done, returning state:")
+                
+            print(f"assistant: {state['messages'][-1]['content']}")
             return state, None
         
-        print("scheduling a tool")
+        if self.debug:
+            print("scheduling a tool")
         # print(response_message)
         
         # Determine which tool to call

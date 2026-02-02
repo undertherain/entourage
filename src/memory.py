@@ -1,5 +1,6 @@
 import json
 import datetime
+import uuid
 from pathlib import Path
 
 class ChatHistory:
@@ -51,6 +52,14 @@ class ChatHistory:
         """Directly sets the message list and saves."""
         self.messages = messages
         self._save()
+
+    def start_new_session(self):
+        """Starts a new session with a new ID."""
+        self.chat_id = str(uuid.uuid4())
+        self.file_path = self.history_dir / f"{self.chat_id}.json"
+        self.messages = []
+        self._save()
+        return self.chat_id
 
 
 class MemoryDB:

@@ -62,9 +62,10 @@ class UserInputNode:
                 continue
                 
             if user_msg.strip() == "/new":
-                # In a real app we might want to trigger a new session, but here we just clear history for simplicity 
-                # or we could return a specific signal. For this basic port, let's just print a message.
-                print("To start a new chat, restart the application (or implement session switching).")
+                new_id = self.history.start_new_session()
+                print(f"[Started new chat {new_id}]")
+                # clear state messages so the agent starts fresh
+                state["messages"] = []
                 continue
             
             # Construct the full system prompt if it's a fresh start or ensure it's there
@@ -105,6 +106,19 @@ class UserInputNode:
 if __name__ == "__main__":
     load_dotenv()
     
+    import argparse
+    import logging
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--debug", action="store_true", help="Enable debug output and graph logging")
+    args = parser.parse_args()
+
+    # Configure logging
+    log_level = logging.INFO if args.debug else logging.WARNING
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    
     # Setup Paths
     agent_name_lower = APP_CONFIG.agent_name.lower()
     agent_base_dir = Path(os.path.expanduser(f"~/.entourage/{agent_name_lower}"))
@@ -126,7 +140,13 @@ if __name__ == "__main__":
         print(f"[Loaded chat {chat_id}]")
         # Print last few messages
         for msg in history.get_messages()[-2:]:
-             print(f"{msg['role']}: {msg.get('content') or '[Tool Call]'}")
+             content = msg.get('content')
+             if msg['role'] == 'tool' and not args.debug:
+                 content = "[Tool Output Result - Hidden]"
+             elif msg['role'] == 'assistant' and msg.get('tool_calls') and not args.debug:
+                 content = f"[Tool Call: {msg['tool_calls'][0]['function']['name']}]"
+             
+             print(f"{msg['role']}: {content}")
     else:
         import uuid
         chat_id = str(uuid.uuid4())
@@ -135,20 +155,15 @@ if __name__ == "__main__":
 
     # Initialize Tools
     tools = [TavilySearchTool(), MemoryTool(memory_db)]
-    
+
     # Initialize implementation nodes
     # We need a wrapper for AgentWithTools to sync back to history!
-    # The default AgentWithTools operates on 'state', but doesn't know about our persistent 'ChatHistory'.
-    # We can handle this by having the AgentWithTools return the state, and then we have a helper or we modify AgentWithTools.
-    # OR, better: We make UserInputNode responsible for syncing state <-> History.
-    # When UserInputNode runs, it loads history into state.
-    # When AgentWithTools runs, it appends to state["messages"].
-    # We need a generic "SyncHistoryNode" or we just subclass AgentWithTools.
+    # ... (existing comments) ...
     
     # Let's subclass AgentWithTools to make it 'PersistableAgent'
     class PersistableAgent(AgentWithTools):
-        def __init__(self, model, tools, history):
-            super().__init__(model, tools)
+        def __init__(self, model, tools, history, debug=False):
+            super().__init__(model, tools, debug=debug)
             self.history = history
             
         def __call__(self, state):
@@ -156,35 +171,18 @@ if __name__ == "__main__":
             new_state, plan = super().__call__(state)
             
             # Sync the NEW messages from state back to history
-            # This is a bit inefficient (diffing), but reliable. 
-            # Or we can just grab the last few.
-            # AgentWithTools appends to state["messages"].
-            # We just need to replace history with state["messages"] (stripping timestamps if needed, but our history handles dicts)
-            
-            # The issue is AgentWithTools might split internal Logic.
-            # Let's just blindly set history to match state messages
-            # But wait, AgentWithTools might return a SEQUENCE.
-            # If it returns a Sequence (tool calls), we haven't finished the turn. 
-            # But we still want to log the tool call.
-            
-            # Use the fact that 'state' object is mutated by AgentWithTools.
             self.history.set_messages(new_state["messages"])
             
-            # If the plan is typically "Self" (loop for tools) or "None" (done),
-            # we need to intercept "None" to return control to UserInput.
             if plan is None:
                 return new_state, user_input_node
             
             # If there is a plan (e.g. tool execution), we return that plan.
-            # BUT, the tools need to return to THIS agent to finish the thought.
-            # AgentWithTools does `Sequence(tool, self)`. 
-            # `self` is THIS PersistableAgent, so it will correctly save history after tool execution too.
             return new_state, plan
 
-    agent_node = PersistableAgent("gpt-5-mini-2025-08-07", tools, history)
+    agent_node = PersistableAgent("gpt-5-mini-2025-08-07", tools, history, debug=args.debug)
     user_input_node = UserInputNode(APP_CONFIG, history, memory_db, agent_node)
     
-    runtime = Runtime()
+    runtime = Runtime(debug=args.debug)
     # We start with User Input
     runtime.start_session(user_input_node, {"messages": []})
     runtime.run()

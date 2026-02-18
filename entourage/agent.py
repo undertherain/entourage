@@ -1,4 +1,8 @@
 from litellm import completion
+import warnings
+
+# Suppress Pydantic serialization warnings globally
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 from .flow import Sequence
 from .utils import pprint
@@ -98,39 +102,52 @@ class AgentWithTools:
         
         for tool_call in response_message.tool_calls:
             function_name = tool_call.function.name
-            # Look up the tool executable from available tools 
-            # We need the ACTUAL tool instance or a wrapper that knows how to execute it since 
-            # our `self.tools` list contains instances.
-            
-            # We need to find the tool instance that matches this name.
-            # Ideally `self.available_tools` would store the instance itself, not just the execute method 
-            # IF our tool execution logic (Sequence) expects a callable that takes state.
-            
-            # Our `Tool` class in `entourage/tools.py` has a `__call__` method that handles state processing.
-            # So if we pass the TOOL INSTANCE to Sequence, it will work.
             
             found_tool = next((t for t in self.tools if t.schema["function"]["name"] == function_name), None)
             
             if found_tool:
-                tool_instances_to_call.append(found_tool)
+                # Wrap the tool to bind it to this specific tool_call (id, args)
+                # This avoids the buggy Tool.__call__ that looks at state[-1]
+                tool_instances_to_call.append(ToolWrapper(found_tool, tool_call))
             else:
                print(f"ERROR: Agent requested unknown tool {function_name}")
 
         if not tool_instances_to_call:
              return state, None
              
-        # If multiple tools, we could return Parallel(tool_instances_to_call) if we implemented a merge.
-        # For now, let's just chain them or take the first one if we want to be safe for now, 
-        # or just handle the first one. 
-        # The original code did `Sequence(self.tools[0], self)`.
-        
-        # Let's do a Sequence of the requested tool + return to Self.
-        # If there are multiple, we should probably do Sequence(t1, t2, ..., self)
-        
         sequence_steps = list(tool_instances_to_call)
         sequence_steps.append(self)
         
         return (state, Sequence(*sequence_steps))
+
+
+class ToolWrapper:
+    def __init__(self, tool, tool_call):
+        self.tool = tool
+        self.tool_call = tool_call
+
+    def __call__(self, state):
+        import json
+        
+        # Extract arguments from the bound tool_call object
+        # tool_call is a litellm/OpenAI object with .function.arguments (string) and .id
+        fc = self.tool_call.function
+        args = json.loads(fc.arguments)
+        
+        print(f"[System] Calling tool: {fc.name}")
+        
+        # Execute the tool
+        tool_result = self.tool.execute(**args)
+        
+        # Append result to state
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": self.tool_call.id,
+            "name": fc.name,
+            "content": tool_result,
+        }
+        state["messages"].append(tool_message)
+        return state, None
 
     @property
     def __name__(self):

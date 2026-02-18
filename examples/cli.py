@@ -109,6 +109,8 @@ if __name__ == "__main__":
     import argparse
     import logging
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default="claude-3-haiku-20240307", help="Model name to use")
+    parser.add_argument("--base-url", type=str, default=None, help="Base URL for the API")
     parser.add_argument("--debug", action="store_true", help="Enable debug output and graph logging")
     args = parser.parse_args()
 
@@ -139,14 +141,27 @@ if __name__ == "__main__":
         history = ChatHistory(chat_id, chat_dir)
         print(f"[Loaded chat {chat_id}]")
         # Print last few messages
-        for msg in history.get_messages()[-2:]:
+        for msg in history.get_messages()[-5:]:
              content = msg.get('content')
-             if msg['role'] == 'tool' and not args.debug:
-                 content = "[Tool Output Result - Hidden]"
-             elif msg['role'] == 'assistant' and msg.get('tool_calls') and not args.debug:
-                 content = f"[Tool Call: {msg['tool_calls'][0]['function']['name']}]"
+             role = msg.get('role')
              
-             print(f"{msg['role']}: {content}")
+             if role == 'system':
+                 continue
+                 
+             if role == 'tool' and not args.debug:
+                 content = "[Tool Output Result - Hidden]"
+             elif role == 'assistant':
+                 if msg.get('tool_calls') and not args.debug:
+                     content = f"[Tool Call: {msg['tool_calls'][0]['function']['name']}]"
+                 elif not content:
+                      # If content is empty/None but no tool calls, it might be a malformed message or just a pure tool call step
+                      if msg.get('function_call'):
+                           content = f"[Function Call: {msg['function_call'].get('name')}]"
+                      else:
+                           content = "" 
+
+             if content:
+                print(f"{role}: {content}")
     else:
         import uuid
         chat_id = str(uuid.uuid4())
@@ -162,8 +177,8 @@ if __name__ == "__main__":
     
     # Let's subclass AgentWithTools to make it 'PersistableAgent'
     class PersistableAgent(AgentWithTools):
-        def __init__(self, model, tools, history, debug=False):
-            super().__init__(model, tools, debug=debug)
+        def __init__(self, model, tools, history, base_url=None, debug=False):
+            super().__init__(model, tools, base_url=base_url, debug=debug)
             self.history = history
             
         def __call__(self, state):
@@ -179,7 +194,7 @@ if __name__ == "__main__":
             # If there is a plan (e.g. tool execution), we return that plan.
             return new_state, plan
 
-    agent_node = PersistableAgent("gpt-5-mini-2025-08-07", tools, history, debug=args.debug)
+    agent_node = PersistableAgent(args.model, tools, history, base_url=args.base_url, debug=args.debug)
     user_input_node = UserInputNode(APP_CONFIG, history, memory_db, agent_node)
     
     runtime = Runtime(debug=args.debug)

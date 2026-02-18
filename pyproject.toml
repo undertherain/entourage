@@ -21,6 +21,7 @@ dependencies = [
     "graphviz",
     "python-dotenv",
     "tavily-python",
+    "litellm",
 ]
 
 [project.urls]

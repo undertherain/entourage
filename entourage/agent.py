@@ -1,15 +1,15 @@
-from openai import OpenAI
+from litellm import completion
 
 from .flow import Sequence
 from .utils import pprint
 
 
 class AgentWithTools:
-    def __init__(self, model, tools, debug=False):
+    def __init__(self, model, tools, base_url=None, debug=False):
         self.model = model
         self.tools = tools
         self.debug = debug
-        self.client = OpenAI()
+        self.base_url = base_url
         self.tools_schemas = []
         self.available_tools = {}
         if tools:
@@ -26,15 +26,45 @@ class AgentWithTools:
         # if "tool_call_result" in state:
         #   print("got fake tool result, exiting")
         #  return state, None
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=state["messages"],
-            tools=self.tools_schemas,
-            # tools=self.tools_schemas if self.tools_schemas else None,
-            # tool_choice="auto",
-        )  # expect messages in state["messages"]
+        try:
+            kwargs = {
+                "model": self.model,
+                "messages": state["messages"],
+                "tools": self.tools_schemas,
+            }
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+                
+            response = completion(**kwargs)  # expect messages in state["messages"]
+        except Exception as e:
+            print(f"Error calling LLM: {e}")
+            return state, None
+
         response_message = response.choices[0].message
-        state["messages"].append(response_message.model_dump())
+        
+        # Handle potential differences in litellm response types
+        # Manually construct dict to avoid Pydantic validation warnings/errors with litellm types
+        msg_dict = {
+            "role": response_message.role,
+            "content": response_message.content,
+        }
+        if response_message.tool_calls:
+            msg_dict["tool_calls"] = []
+            for tc in response_message.tool_calls:
+                # litellm tool calls might be Objects or dicts
+                if hasattr(tc, 'model_dump'):
+                    tc_dict = tc.model_dump()
+                else:
+                    tc_dict = dict(tc)
+                msg_dict["tool_calls"].append(tc_dict)
+                
+        if hasattr(response_message, 'function_call') and response_message.function_call:
+             if hasattr(response_message.function_call, 'model_dump'):
+                 msg_dict["function_call"] = response_message.function_call.model_dump()
+             else:
+                 msg_dict["function_call"] = dict(response_message.function_call)
+
+        state["messages"].append(msg_dict)
         # if last response is user message: call llm
         # if last response is tool call: call all tools amd loop back to itself
         # dummy_tool_invocation = {
@@ -45,7 +75,8 @@ class AgentWithTools:
             if self.debug:
                 print("agent done, returning state:")
                 
-            print(f"assistant: {state['messages'][-1]['content']}")
+            content = state['messages'][-1].get('content', '')
+            print(f"assistant: {content}")
             return state, None
         
         if self.debug:
@@ -55,6 +86,10 @@ class AgentWithTools:
         # Determine which tool to call
         # The agent can request multiple tool calls, but handling them in parallel in our current architecture requires 
         # mapping them to specific tool instances.
+        
+        # Notify user of tool usage
+        tool_names = [tc.function.name for tc in response_message.tool_calls]
+        print(f"[Agent is calling tools: {', '.join(tool_names)}]")
         
         tool_instances_to_call = []
         

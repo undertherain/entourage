@@ -235,3 +235,57 @@ class WriteFileTool(Tool):
             return f"Success: File '{path}' written."
         except Exception as e:
             return f"Error writing file: {e}"
+
+
+class RunCommandTool(Tool):
+    def __init__(self):
+        self._schema = {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Execute a shell command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The command to execute (e.g., 'python3 test.py').",
+                        }
+                    },
+                    "required": ["command"],
+                },
+            },
+        }
+
+    @property
+    def schema(self):
+        return self._schema
+
+    def execute(self, command: str):
+        try:
+            import subprocess
+            logger.info(f"-> Running command: '{command}'")
+            # Using shell=True for flexibility, but be aware of security implications if widely exposed
+            # Capture both stdout and stderr
+            result = subprocess.run(
+                command, 
+                shell=True, 
+                text=True, 
+                capture_output=True,
+                timeout=30 # Add a timeout to prevent hanging commands
+            )
+            
+            output = ""
+            if result.stdout:
+                output += f"[stdout]\n{result.stdout}\n"
+            if result.stderr:
+                output += f"[stderr]\n{result.stderr}\n"
+                
+            if not output:
+                output = "[Command executed successfully with no output]"
+                
+            return output.strip()
+        except subprocess.TimeoutExpired:
+             return "Error: Command timed out after 30 seconds."
+        except Exception as e:
+            return f"Error executing command: {e}"

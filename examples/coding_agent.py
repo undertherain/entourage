@@ -8,7 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from entourage.runtime import Runtime
 from entourage.agent import AgentWithTools, PersistableAgent
-from entourage.tools import ListDirTool, ReadFileTool, WriteFileTool
+from entourage.tools import ListDirTool, ReadFileTool, WriteFileTool, RunCommandTool
 from entourage.memory import ChatHistory
 from entourage.flow import Sequence
 
@@ -29,7 +29,9 @@ You are an expert software engineer AI. Follow all instructions below precisely.
   - `list_files`: Use this to explore the directory structure.
   - `read_file`: Use this to read the content of files.
   - `write_file`: Use this to write content to a file. Behavior: overwritten if exists, created if not.
+  - `run_command`: Use this to execute shell commands.
 - **Analysis:** proper analysis often requires understanding the project structure first, then reading specific files.
+- **Verification:** After writing code, ALWAYS verify it by running it with the `run_command` tool (e.g., `python3 filename.py`).
 - **Safety:** You have write access. Be careful when overwriting files. Always double-check path.
 - **Communication:** Be concise and technical.
 """
@@ -138,7 +140,7 @@ if __name__ == "__main__":
         print(f"[Started new chat {chat_id}]")
 
     # Initialize Tools
-    tools = [ListDirTool(), ReadFileTool(), WriteFileTool()]
+    tools = [ListDirTool(), ReadFileTool(), WriteFileTool(), RunCommandTool()]
 
     # PersistableAgent is now imported from entourage.agent
     

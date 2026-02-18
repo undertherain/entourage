@@ -42,7 +42,6 @@ APP_CONFIG = PersonaConfig(
     guidelines=guidelines,
 )
 
-# Nodes
 class UserInputNode:
     def __init__(self, config: PersonaConfig, history: ChatHistory, memory_db: MemoryDB, agent_node):
         self.config = config
@@ -57,17 +56,14 @@ class UserInputNode:
                 user_msg = input()
             except EOFError:
                 return state, None # End session
-            
             if not user_msg:
                 continue
-                
             if user_msg.strip() == "/new":
                 new_id = self.history.start_new_session()
                 print(f"[Started new chat {new_id}]")
                 # clear state messages so the agent starts fresh
                 state["messages"] = []
                 continue
-            
             # Construct the full system prompt if it's a fresh start or ensure it's there
             current_messages = self.history.get_messages()
             if not current_messages or current_messages[0].get("role") != "system":
@@ -83,20 +79,12 @@ class UserInputNode:
                         f"\n\nHere are facts you remember about {self.config.user_name}:\n"
                         + facts
                     )
-                
                 final_system_prompt = f"{persona_prompt}\n\n{self.config.guidelines}{memory_prompt_part}".strip()
-                
-                # Prepend system message
                 updated_messages = [{"role": "system", "content": final_system_prompt}] + current_messages
                 self.history.set_messages(updated_messages)
 
-            # Add user message to history
             self.history.append({"role": "user", "content": user_msg})
-            
-            # Update state with latest messages
             state["messages"] = self.history.get_messages()
-
-            # Pass control to agent
             return state, self.agent_node
 
     @property
@@ -171,13 +159,6 @@ if __name__ == "__main__":
     # Initialize Tools
     tools = [TavilySearchTool(), MemoryTool(memory_db)]
 
-    # Initialize implementation nodes
-    # We need a wrapper for AgentWithTools to sync back to history!
-    # ... (existing comments) ...
-    
-    # Let's subclass AgentWithTools to make it 'PersistableAgent'
-    # PersistableAgent is now imported from entourage.agent
-    
     agent_node = PersistableAgent(args.model, tools, history, return_node=None, base_url=args.base_url, debug=args.debug)
     user_input_node = UserInputNode(APP_CONFIG, history, memory_db, agent_node)
     

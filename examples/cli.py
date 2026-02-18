@@ -141,7 +141,7 @@ if __name__ == "__main__":
         history = ChatHistory(chat_id, chat_dir)
         print(f"[Loaded chat {chat_id}]")
         # Print last few messages
-        for msg in history.get_messages()[-5:]:
+        for msg in history.get_messages()[-10:]:
              content = msg.get('content')
              role = msg.get('role')
              

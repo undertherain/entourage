@@ -35,7 +35,10 @@ class AgentWithTools:
             if self.base_url:
                 kwargs["base_url"] = self.base_url
                 
-            response = completion(**kwargs)  # expect messages in state["messages"]
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+                response = completion(**kwargs)  # expect messages in state["messages"]
         except Exception as e:
             print(f"Error calling LLM: {e}")
             return state, None

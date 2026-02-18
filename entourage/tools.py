@@ -106,3 +106,132 @@ class MemoryTool(Tool):
         logger.info(f"-> Remembering: '{fact_to_remember}'")
         self.memory_db.add(fact_to_remember)
         return f"Success: Fact saved."
+
+
+class ListDirTool(Tool):
+    def __init__(self):
+        self._schema = {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List files and directories in a given path. Useful for exploring the project structure.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The path to list. Defaults to current directory '.'",
+                        }
+                    },
+                    "required": ["path"],
+                },
+            },
+        }
+
+    @property
+    def schema(self):
+        return self._schema
+
+    def execute(self, path: str = "."):
+        try:
+            expanded_path = os.path.expanduser(path)
+            if not os.path.exists(expanded_path):
+                return f"Error: Path '{path}' does not exist."
+            
+            items = os.listdir(expanded_path)
+            # Add type info (file or dir)
+            result = []
+            for item in items:
+                 full_path = os.path.join(expanded_path, item)
+                 type_str = "DIR" if os.path.isdir(full_path) else "FILE"
+                 result.append(f"[{type_str}] {item}")
+            
+            return "\n".join(sorted(result))
+        except Exception as e:
+            return f"Error: {e}"
+
+
+class ReadFileTool(Tool):
+    def __init__(self):
+        self._schema = {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read the content of a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The path to the file to read.",
+                        }
+                    },
+                    "required": ["path"],
+                },
+            },
+        }
+
+    @property
+    def schema(self):
+        return self._schema
+
+    def execute(self, path: str):
+        try:
+            expanded_path = os.path.expanduser(path)
+            if not os.path.exists(expanded_path):
+                 return f"Error: File '{path}' does not exist."
+            
+            if not os.path.isfile(expanded_path):
+                 return f"Error: '{path}' is not a file."
+
+            with open(expanded_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+            return content
+        except Exception as e:
+            return f"Error reading file: {e}"
+
+
+class WriteFileTool(Tool):
+    def __init__(self):
+        self._schema = {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write content to a file. Behavior: overwritten if exists, created if not.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The path to the file to write.",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The full content to write to the file.",
+                        }
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        }
+
+    @property
+    def schema(self):
+        return self._schema
+
+    def execute(self, path: str, content: str):
+        try:
+            expanded_path = os.path.expanduser(path)
+            
+            # Ensure parent directory exists
+            parent_dir = os.path.dirname(expanded_path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir)
+            
+            with open(expanded_path, "w", encoding="utf-8") as f:
+                f.write(content)
+                
+            return f"Success: File '{path}' written."
+        except Exception as e:
+            return f"Error writing file: {e}"

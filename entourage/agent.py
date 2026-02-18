@@ -135,3 +135,23 @@ class AgentWithTools:
     @property
     def __name__(self):
         return self.__class__.__name__
+
+
+class PersistableAgent(AgentWithTools):
+    def __init__(self, model, tools, history, return_node=None, base_url=None, debug=False):
+        super().__init__(model, tools, base_url=base_url, debug=debug)
+        self.history = history
+        self.return_node = return_node
+        
+    def __call__(self, state):
+        # Run the original agent logic
+        new_state, plan = super().__call__(state)
+        
+        # Sync the NEW messages from state back to history
+        self.history.set_messages(new_state["messages"])
+        
+        # If no internal plan (agent done), go to return_node if specified
+        if plan is None and self.return_node:
+            return new_state, self.return_node
+        
+        return new_state, plan

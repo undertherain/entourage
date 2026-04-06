@@ -14,6 +14,21 @@ class ControlFlow:
     pass
 
 
+class Conditional(ControlFlow):
+    """Gate a sub-plan on a state key being truthy.
+
+    Usage: Sequence("triage", Conditional("need_to_reply", Sequence("generate", "send")))
+    If state["need_to_reply"] is falsy after triage, the inner plan is skipped.
+    """
+
+    def __init__(self, condition: str, plan: Union["Schedule", "Node"]):
+        self.condition = condition
+        self.plan = plan
+
+    def __repr__(self):
+        return f"Conditional({self.condition!r}, {self.plan})"
+
+
 class Sequence(ControlFlow):
     """Represents a sequential chain of nodes or sub-schedules."""
 

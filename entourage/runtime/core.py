@@ -6,8 +6,8 @@ from typing import Any, Callable, Dict, List, Set, Tuple, Union
 from graphviz import Digraph
 import os
 
-from .flow import Node, Parallel, Sequence
-from .utils import pprint
+from ..flow import Node, Parallel, Sequence
+from ..utils import pprint
 
 logger = logging.getLogger(__name__)
 

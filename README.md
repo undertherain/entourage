@@ -1,71 +1,151 @@
-# Entourage: Control-by-Return for Autonomous Agents
+# Entourage
 
-Entourage is a framework for building resilient, scalable, and dynamic AI agents. It shifts the paradigm from the traditional "loop-and-call" model to a declarative **"Control-by-Return"** architecture.
+**Entourage is a small Python framework for building LLM agents and workflows as one
+thing.** Steps are pure functions that *return* a declarative plan instead of calling each
+other; a runtime executes the plan against a persistent graph, so runs are durable,
+resumable, and replayable. The pattern it's built on is called **Control-by-Return**.
 
-> **Philosophy**: Instead of an agent holding the execution thread, nodes in Entourage are **Pure Functions**. They take a state and return a *Plan* (a data structure representing the next steps). The runtime manages the execution, ensuring fault tolerance and observability.
+> Status: research prototype / reference implementation — a vehicle for the idea, not a
+> production framework. Expect rough edges and a small, deliberately minimal API.
 
-## Key Features
+---
 
-- **Control-by-Return**: Decouple logic from execution. Nodes return declarative plans (`Sequence`, `Parallel`) instead of calling functions directly.
-- **Dynamic Graph Generation**: The execution graph is built and modified on the fly based on agent decisions, allowing for highly adaptive workflows.
-- **Stateless & Resilient**: Because state is explicitly passed and returned, workers can be fully stateless. Execution can be paused, persisted, and resumed on any machine ("dehydration/rehydration").
-- **Time Travel Debugging**: Since the control flow is a persisted data structure, you can replay sessions, inspect past states, and debug failures with precision.
+## The idea
 
-## Installation
+LLM systems usually sit at one of two ends of a spectrum:
 
-Entourage is available as a Python package.
+- **Workflows** — hand-wired graphs of steps (à la LangGraph, Airflow, Temporal). They are
+  deterministic and durable, each step is easy to test, and you can route every step to the
+  most appropriate (often cheapest) model. The cost is brittleness: a workflow can only do
+  what it was wired to do.
+- **Agents** — an LLM in a Reason–Act loop (à la LangChain, CrewAI, AutoGen). They handle
+  novel inputs because the model picks the next action at runtime, but they are expensive,
+  the orchestration lives inside one model's context window, and the whole run sits in a
+  single process — a crash mid-tool loses it.
+
+Most real systems live in between, and the only thing that really differs between the two
+ends is **where the decision about the next step lives** — in the graph you drew, or inside
+a model at runtime. Entourage makes that location a *return value*, and the two ends become
+two configurations of the same machinery.
+
+### How it works
+
+A **node** is a pure function:
+
+```python
+node: state -> (new_state, plan)
+```
+
+A node never calls another node directly. Instead it returns a **plan**, built from three
+combinators:
+
+```python
+Sequence(a, b, c)        # run a, then b, then c
+Parallel(a, b, c)        # fork-join; resulting states are merged
+Conditional(key, plan)   # run plan only if state[key] is truthy
+```
+
+The runtime splices the returned plan into a **persistent execution graph**, between the
+current node and whatever was scheduled to follow it. Because the plan is data on disk — not
+frames on a call stack — a run can be paused, persisted, resumed on another machine, retried,
+and replayed. (This is *trampolined execution*: each step yields control back to a scheduler
+instead of recursing through the host language's stack.)
+
+Two things follow directly:
+
+- **An agent is a workflow with a self-edge.** The whole Reason–Act loop is one line — the
+  node schedules a tool, then schedules *itself* to inspect the result:
+
+  ```python
+  return context, Sequence(tool, my_node)
+  ```
+
+- **A workflow is an agent without LLM decisions** — a node whose plan happens to be
+  hard-coded. So the choice is no longer "framework A vs framework B" but, per node:
+  *who picks the next step — me, or the model?*
+
+And two useful properties come for free:
+
+- **Per-step model selection.** Each node embeds its own model and prompt, so you can mix
+  cheap and expensive LLMs within one flow — a cheap classifier can gate an expensive
+  reasoner. Cost and capability are decided per step, not globally.
+- **Durable, replayable runs.** Persistence, retries, and time-travel debugging come from
+  the runtime, because the control flow is just a persisted data structure. Runtime-grown
+  structures like Tree-of-Thought fit the same primitive: a node returns `Parallel` over
+  candidate branches and the thought tree *is* the execution graph.
+
+### A worked example
+
+A Telegram community-manager bot. Each incoming message starts a session with the initial
+plan `Sequence(Triage, End)`:
+
+- `Triage` runs a cheap yes/no LLM. Off-topic → it returns no plan and the session ends.
+- On-topic → it returns `Sequence(Generate, Send)`, which the runtime splices into the
+  graph. `Generate` is a tool-calling agent on a stronger LLM with RAG; `Send` posts the
+  reply.
+
+One small program demonstrates per-step model selection, a graph that grows at runtime
+(triage decides the rest of the plan), and human-in-the-loop readiness: an approval node can
+be inserted before `Send` without touching any other code.
+
+---
+
+## Install
+
+Entourage is a Python package; install it from the repository root:
 
 ```bash
-git clone https://github.com/your-repo/entourage.git
-cd entourage
 pip install -e .
 ```
 
-## Quick Start
+Provide API keys via a `.env` file:
 
-We provide a CLI example that demonstrates a Persistable Agent with memory and search tools.
-
-### 1. Configure Environment
-Create a `.env` file with your API keys:
 ```bash
-TAVILY_API_KEY=tvly-...
 OPENAI_API_KEY=sk-...
+TAVILY_API_KEY=tvly-...   # for the search-tool example
 ```
 
-### 2. Run the CLI
+## Quick start
+
+A CLI example runs a persistable agent with memory and search tools:
+
 ```bash
 python3 examples/cli.py
 ```
 
-### 3. Usage
-- Interact naturally with the agent.
-- Use `/new` to start a fresh session (clears context but keeps long-term memory).
-- Use `--debug` flag for verbose output and graph generation.
+- Interact with the agent in natural language.
+- `/new` starts a fresh session (clears context, keeps long-term memory).
+- `--debug` enables verbose output and prints the generated graph:
 
 ```bash
 python3 examples/cli.py --debug
 ```
 
+More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
+
+---
+
 ## Architecture
 
-### The Execution Graph
-Every step in an agent's lifecycle is a node in a Directed Acyclic Graph (DAG).
-- **Nodes**: Pure functions `f(state) -> (new_state, Plan)`.
-- **Edges**: Dependencies between executions.
-- **Plans**: Data structures (`Sequence`, `Parallel`) that tell the runtime how to modify the graph.
+- **`entourage/flow.py`** — the combinators: `Sequence`, `Parallel`, `Conditional`.
+- **`entourage/runtime/`** — the scheduler. State store, ready queue, and a `Runtime` that
+  drives stateless workers. Backend-agnostic: an in-memory backend for development, and a
+  cloud backend on AWS (DynamoDB for state, SQS for the ready queue, Lambda for workers).
+- **`entourage/agent.py`** — high-level helpers that package the one-line Reason–Act pattern
+  and compile down to the same `Sequence`/`Parallel` primitives the workers understand.
 
-### Example: A "Reason-Act" Node
-```python
-def my_reasoning_node(state):
-    # Logic to determine next step...
-    if needs_search:
-        return state, Sequence(SearchTool(query="..."), my_reasoning_node)
-    
-    return state, None # Done
-```
+Long-running tools and human-in-the-loop steps go through the same dispatch/result-queue
+path, so workers never block: the runtime parks the plan, frees the worker, and resumes
+wherever the result lands — even days later.
 
-This simple return value drives the entire orchestration, allowing the system to handle the complexities of scheduling, retries, and state persistence.
+See `ARCHITECTURE.md` for more.
 
-## Contributing
+---
 
-We welcome contributions! Please see `CONTRIBUTING.md` for details.
+## Status and limitations
+
+Entourage is a programming-concept experiment, offered as an invitation to use the
+primitive rather than as a drop-in dependency. The calculus is deliberately minimal —
+three combinators — and there is not yet typed-plan support, a principled scheduling
+policy, or a quantitative comparison against incumbent frameworks. The reference
+implementation may lag the design.

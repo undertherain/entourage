@@ -208,3 +208,9 @@ __marimo__/
 
 # Logs
 logs/
+
+# Entourage local state & reference material
+data/
+config/telegram.yaml
+logs/
+refs/

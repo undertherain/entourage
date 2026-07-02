@@ -1,0 +1,7 @@
+# Copy to config/telegram.yaml and fill in your values
+bot_token: "YOUR_BOT_TOKEN"
+bot_id: "YOUR_BOT_ID"  # numeric part before the colon in the token
+
+# Optional: if you run a separate Telegram service container
+# service_url: "http://127.0.0.1:8000"
+# service_token: "your_service_api_key"

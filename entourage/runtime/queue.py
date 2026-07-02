@@ -1,38 +1,39 @@
 """
-SQS-backed runtime for Entourage.
+The Entourage runtime engine.
 
-External services (Telegram, cron, etc.) push trigger messages to SQS.
-This runtime polls SQS, manages DAG state in SQLite, and executes nodes.
+One engine, pluggable backends: a ``GraphStore`` for the execution graph and
+a ``ReadyQueue`` for pointers to ready work — both constructor injections.
+External services (Telegram, cron, etc.) push trigger messages to the queue;
+the runtime polls it, advances the DAG in the store, and executes nodes.
 
 Usage:
-    runtime = QueueRuntime(node_registry={
-        "triage_message": triage_fn,
-        "generate_response": generate_fn,
-        "send_message": send_fn,
-    })
+    runtime = QueueRuntime(
+        node_registry={
+            "triage_message": triage_fn,
+            "generate_response": generate_fn,
+            "send_message": send_fn,
+        },
+        store=SQLiteGraphStore(Path("data/entourage.db")),
+        queue=InMemoryReadyQueue(),  # or SQSReadyQueue(...), Redis later
+    )
     runtime.register_pipeline("telegram_reply", telegram_reply_pipeline)
     runtime.run()
+
+Defaults preserve the original behavior (SQLite store + SQS queue) when
+nothing is injected.
 """
 
-import json
 import logging
 import time
-import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Union
 
-import boto3
-from botocore.exceptions import ClientError
-
-from ..flow import Conditional, ControlFlow, Parallel, Sequence
-from .store import DEFAULT_DB_PATH, GraphStore
+from ..flow import Parallel, Sequence
+from .interfaces import GraphStore, ReadyQueue
+from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan, resolve_node
+from .store import DEFAULT_DB_PATH, SQLiteGraphStore
 
 logger = logging.getLogger(__name__)
-
-# Sentinel node names
-HEAD = "__HEAD__"
-END = "__END__"
-MERGE = "__MERGE__"
 
 
 # Type for pipeline templates: callable that returns a plan (Sequence/Parallel/str)
@@ -43,29 +44,20 @@ class QueueRuntime:
     def __init__(
         self,
         node_registry: Dict[str, Callable] = None,
+        store: GraphStore = None,
+        queue: ReadyQueue = None,
         queue_name: str = "entourage_tasks",
         region: str = "us-east-1",
         db_path: Path = DEFAULT_DB_PATH,
     ):
         self.node_registry = node_registry or {}
         self.pipelines: Dict[str, PipelineTemplate] = {}
-        self.queue_name = queue_name
-        self.region = region
-        self.store = GraphStore(db_path)
-        self.queue = self._get_or_create_queue()
+        self.store = store if store is not None else SQLiteGraphStore(db_path)
+        if queue is None:
+            from .sqs import SQSReadyQueue
 
-    def _get_or_create_queue(self):
-        sqs = boto3.resource("sqs", region_name=self.region)
-        try:
-            queue = sqs.get_queue_by_name(QueueName=self.queue_name)
-            logger.info("Connected to queue %s", self.queue_name)
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "AWS.SimpleQueueService.NonExistentQueue":
-                queue = sqs.create_queue(QueueName=self.queue_name, Attributes={})
-                logger.info("Created queue %s", self.queue_name)
-            else:
-                raise
-        return queue
+            queue = SQSReadyQueue(queue_name=queue_name, region=region)
+        self.queue = queue
 
     # ── Registration ──────────────────────────────────────────
 
@@ -82,72 +74,23 @@ class QueueRuntime:
         """
         self.pipelines[trigger_name] = template
 
-    # ── Plan expansion ────────────────────────────────────────
-
-    def _expand_plan(
-        self, plan: Union[str, Sequence, Parallel], session_id: str
-    ) -> Tuple[List[str], str]:
-        """
-        Expand a plan into executions + edges in SQLite.
-        Returns (start_exec_ids, end_exec_id).
-        """
-        if isinstance(plan, str):
-            # Single named node
-            exec_id = self.store.add_execution(session_id, plan)
-            return [exec_id], exec_id
-
-        elif isinstance(plan, Sequence):
-            all_segments = []  # list of (starts, end)
-            for item in plan.items:
-                starts, end = self._expand_plan(item, session_id)
-                if all_segments:
-                    # Wire previous end → current starts
-                    prev_end = all_segments[-1][1]
-                    for s in starts:
-                        self.store.add_edge(session_id, prev_end, s)
-                all_segments.append((starts, end))
-            return all_segments[0][0], all_segments[-1][1]
-
-        elif isinstance(plan, Conditional):
-            # Create a gate node that checks the condition
-            gate_name = f"__GATE__{plan.condition}"
-            gate_id = self.store.add_execution(
-                session_id, gate_name, exec_id=f"gate-{uuid.uuid4().hex[:8]}"
-            )
-            # Expand the inner plan
-            inner_starts, inner_end = self._expand_plan(plan.plan, session_id)
-            # Wire: gate → inner_starts (with condition on edges)
-            for s in inner_starts:
-                self.store.add_edge(session_id, gate_id, s, condition=plan.condition)
-            return [gate_id], inner_end
-
-        elif isinstance(plan, Parallel):
-            # Create a merge node
-            merge_id = self.store.add_execution(
-                session_id, MERGE, exec_id=f"merge-{uuid.uuid4().hex[:8]}"
-            )
-            all_starts = []
-            for item in plan.items:
-                starts, end = self._expand_plan(item, session_id)
-                all_starts.extend(starts)
-                # Wire each branch end → merge
-                self.store.add_edge(session_id, end, merge_id)
-            return all_starts, merge_id
-
-        else:
-            raise ValueError(f"Unknown plan type: {type(plan)}")
-
     # ── Session creation ──────────────────────────────────────
 
     def start_session(
-        self, trigger: str, initial_state: Dict[str, Any], plan=None
+        self, trigger, initial_state: Dict[str, Any] = None, plan: Plan = None
     ) -> str:
         """
         Create a new session from a trigger.
 
-        If plan is provided, use it directly.
-        Otherwise, look up registered pipeline template for the trigger.
+        `trigger` is normally a trigger name whose registered pipeline
+        template produces the plan; passing a plan (Sequence/Parallel/
+        callable) as `trigger` runs it directly as an ad-hoc session.
+        An explicit `plan` overrides the pipeline lookup either way.
         """
+        initial_state = initial_state or {}
+        if plan is None and not isinstance(trigger, str):
+            trigger, plan = "adhoc", trigger
+
         if plan is None:
             if trigger not in self.pipelines:
                 raise ValueError(
@@ -158,12 +101,13 @@ class QueueRuntime:
 
         session_id = self.store.create_session(trigger, initial_state)
 
-        # Create HEAD and END
+        # Create HEAD and END sentinels
         head_id = self.store.add_execution(session_id, HEAD, exec_id=f"head-{session_id[:8]}")
         end_id = self.store.add_execution(session_id, END, exec_id=f"end-{session_id[:8]}")
 
-        # Expand plan
-        plan_starts, plan_end = self._expand_plan(plan, session_id)
+        plan_starts, plan_end = expand_plan(
+            self.store, session_id, plan, self.node_registry
+        )
 
         # Wire: HEAD → plan_starts, plan_end → END
         for s in plan_starts:
@@ -173,7 +117,6 @@ class QueueRuntime:
         # Mark HEAD as completed immediately (it's just a sentinel)
         self.store.mark_completed(head_id, initial_state)
 
-        # Enqueue ready nodes
         self._enqueue_ready(session_id)
 
         logger.info("Started session %s for trigger '%s'", session_id, trigger)
@@ -188,6 +131,15 @@ class QueueRuntime:
             logger.error("Execution %s not found", exec_id)
             return
 
+        # Idempotence guard: the queue is at-least-once (SQS redelivery,
+        # startup recovery, double-ready on fan-in), so the same execution
+        # can be delivered more than once. Only pending work runs.
+        if execution["status"] != "pending":
+            logger.debug(
+                "Skipping execution %s (status=%s)", exec_id, execution["status"]
+            )
+            return
+
         node_name = execution["node_name"]
 
         # Handle END sentinel
@@ -198,14 +150,14 @@ class QueueRuntime:
             return
 
         # Handle GATE — pass through state, conditions on edges do the filtering
-        if node_name.startswith("__GATE__"):
+        if node_name.startswith(GATE_PREFIX):
             input_state = self.store.collect_input_state(exec_id)
             self.store.mark_completed(exec_id, input_state)
-            # Check if condition is met — if not, skip children and go to END
-            condition_key = node_name[len("__GATE__"):]
+            condition_key = node_name[len(GATE_PREFIX):]
             if not input_state.get(condition_key):
+                # KNOWN GAP: skipping should resume after the gated sub-plan;
+                # today it ends the whole session (fine for trailing gates).
                 logger.info("Gate condition '%s' not met, skipping branch", condition_key)
-                # Find the session's END node and mark session complete
                 self.store.complete_session(session_id)
             else:
                 self._enqueue_ready(session_id)
@@ -244,7 +196,9 @@ class QueueRuntime:
 
             # If the node returned a dynamic plan, inject it
             if plan is not None:
-                plan_starts, plan_end = self._expand_plan(plan, session_id)
+                plan_starts, plan_end = expand_plan(
+                    self.store, session_id, plan, self.node_registry
+                )
                 self.store.rewire_after_plan_injection(
                     exec_id, plan_starts, plan_end, session_id
                 )
@@ -264,14 +218,12 @@ class QueueRuntime:
             self._send_to_queue(ex["id"], session_id)
 
     def _send_to_queue(self, exec_id: str, session_id: str):
-        self.queue.send_message(
-            MessageBody=json.dumps({
-                "type": "execute",
-                "exec_id": exec_id,
-                "session_id": session_id,
-                "time_created": time.time(),
-            })
-        )
+        self.queue.send({
+            "type": "execute",
+            "exec_id": exec_id,
+            "session_id": session_id,
+            "time_created": time.time(),
+        })
         logger.debug("Enqueued execution %s", exec_id)
 
     def send_trigger(self, trigger: str, state: Dict[str, Any]):
@@ -280,14 +232,12 @@ class QueueRuntime:
 
         This is what external services call — e.g. Telegram listener.
         """
-        self.queue.send_message(
-            MessageBody=json.dumps({
-                "type": "trigger",
-                "trigger": trigger,
-                "state": state,
-                "time_created": time.time(),
-            })
-        )
+        self.queue.send({
+            "type": "trigger",
+            "trigger": trigger,
+            "state": state,
+            "time_created": time.time(),
+        })
         logger.info("Sent trigger '%s' to queue", trigger)
 
     # ── Main loop ─────────────────────────────────────────────
@@ -308,14 +258,16 @@ class QueueRuntime:
         else:
             logger.warning("Unknown message type: %s", msg_type)
 
-    def run(self, poll_wait: int = 10):
+    def run(self, poll_wait: float = 10, stop_when_idle: bool = False):
         """
-        Main loop. Polls SQS and executes nodes.
+        Main loop. Polls the queue and executes nodes.
 
-        Also checks for any ready nodes from running sessions on startup
-        (crash recovery).
+        Also re-enqueues ready nodes of running sessions on startup
+        (crash recovery). With stop_when_idle=True the loop exits on the
+        first empty poll — correct for single-process in-memory runs,
+        where an empty queue means no work can ever arrive.
         """
-        logger.info("QueueRuntime starting, polling %s...", self.queue_name)
+        logger.info("QueueRuntime starting...")
 
         # Crash recovery: check for any sessions that were running
         for session in self.store.get_running_sessions():
@@ -323,33 +275,26 @@ class QueueRuntime:
             self._enqueue_ready(session["id"])
 
         while True:
-            messages = self.queue.receive_messages(
-                MaxNumberOfMessages=10,
-                WaitTimeSeconds=poll_wait,
-            )
+            messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
 
             if not messages:
+                if stop_when_idle:
+                    logger.info("Queue idle, stopping.")
+                    break
                 continue
 
-            for message in messages:
-                try:
-                    body = json.loads(message.body)
-                    self._handle_message(body)
-                    message.delete()
-                except Exception as e:
-                    logger.exception("Error processing message: %s", e)
-                    # Message will return to queue after visibility timeout
+            self._process_messages(messages)
 
-    def run_once(self):
+    def run_once(self, poll_wait: float = 1):
         """Process one batch of messages and return. Useful for testing."""
-        messages = self.queue.receive_messages(
-            MaxNumberOfMessages=10,
-            WaitTimeSeconds=1,
-        )
+        messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
+        self._process_messages(messages)
+
+    def _process_messages(self, messages):
         for message in messages:
             try:
-                body = json.loads(message.body)
-                self._handle_message(body)
-                message.delete()
+                self._handle_message(message.payload)
+                message.ack()
             except Exception as e:
                 logger.exception("Error processing message: %s", e)
+                message.nack()

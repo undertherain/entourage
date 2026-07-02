@@ -24,6 +24,11 @@ dependencies = [
     "litellm",
 ]
 
+[project.optional-dependencies]
+redis = ["redis"]
+sqs = ["boto3"]
+dev = ["pytest"]
+
 [project.urls]
 "Homepage" = "https://github.com/example/entourage"
 "Bug Tracker" = "https://github.com/example/entourage/issues"

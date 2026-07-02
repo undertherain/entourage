@@ -128,9 +128,14 @@ More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
 ## Architecture
 
 - **`entourage/flow.py`** — the combinators: `Sequence`, `Parallel`, `Conditional`.
-- **`entourage/runtime/`** — the scheduler. State store, ready queue, and a `Runtime` that
-  drives stateless workers. Backend-agnostic: an in-memory backend for development, and a
-  cloud backend on AWS (DynamoDB for state, SQS for the ready queue, Lambda for workers).
+- **`entourage/runtime/`** — the scheduler. One engine (`QueueRuntime`) behind two backend
+  seams: `GraphStore` (the persistent execution graph — in-memory and SQLite backends today,
+  a graph store planned) and `ReadyQueue` (pointers to ready work — in-memory, Redis with
+  fair-share claiming per session, and AWS SQS).
+  The in-memory pair powers the local `Runtime` used by the examples; any durable
+  store+queue combination gives fault-tolerant, resumable runs. The graph algebra (ready
+  detection, fan-in joins, plan splicing) is shared code, tested identically across
+  backends (`tests/`).
 - **`entourage/agent.py`** — high-level helpers that package the one-line Reason–Act pattern
   and compile down to the same `Sequence`/`Parallel` primitives the workers understand.
 

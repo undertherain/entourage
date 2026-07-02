@@ -1,6 +1,8 @@
 """
-SQLite-backed persistence for Entourage execution graphs.
+SQLite-backed GraphStore.
 
+Implements only the storage primitives; the graph algebra (ready detection,
+input collection, rewiring) is inherited from the GraphStore interface.
 Only the runtime touches this — external services talk to the queue only.
 """
 
@@ -11,14 +13,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .interfaces import GraphStore
+
 
 DEFAULT_DB_PATH = Path("data/entourage.db")
 
 
-class GraphStore:
+class SQLiteGraphStore(GraphStore):
     """SQLite-backed storage for sessions, executions, and edges."""
 
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):
+        db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
         self.conn = sqlite3.connect(str(db_path))
@@ -65,11 +70,17 @@ class GraphStore:
         """)
         self.conn.commit()
 
+    @staticmethod
+    def _decode_execution(row) -> Dict:
+        d = dict(row)
+        for field in ("input_state", "result_state"):
+            if d.get(field):
+                d[field] = json.loads(d[field])
+        return d
+
     # ── Sessions ──────────────────────────────────────────────
 
-    def create_session(
-        self, trigger: str, initial_state: Dict[str, Any]
-    ) -> str:
+    def create_session(self, trigger: str, initial_state: Dict[str, Any]) -> str:
         session_id = uuid.uuid4().hex
         self.conn.execute(
             "INSERT INTO sessions (id, trigger, status, initial_state, created_at) "
@@ -128,13 +139,21 @@ class GraphStore:
         row = self.conn.execute(
             "SELECT * FROM executions WHERE id = ?", (exec_id,)
         ).fetchone()
-        if row:
-            d = dict(row)
-            for field in ("input_state", "result_state"):
-                if d[field]:
-                    d[field] = json.loads(d[field])
-            return d
-        return None
+        return self._decode_execution(row) if row else None
+
+    def get_session_executions(
+        self, session_id: str, status: str = None
+    ) -> List[Dict]:
+        if status is None:
+            rows = self.conn.execute(
+                "SELECT * FROM executions WHERE session_id = ?", (session_id,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM executions WHERE session_id = ? AND status = ?",
+                (session_id, status),
+            ).fetchall()
+        return [self._decode_execution(r) for r in rows]
 
     def mark_running(self, exec_id: str, input_state: Dict[str, Any]):
         self.conn.execute(
@@ -184,146 +203,26 @@ class GraphStore:
         self.conn.commit()
 
     def get_parents(self, exec_id: str) -> List[Dict]:
-        """Get all parent executions for a given execution."""
         rows = self.conn.execute(
             "SELECT e.*, ed.condition FROM executions e "
             "JOIN edges ed ON ed.from_exec_id = e.id "
             "WHERE ed.to_exec_id = ?",
             (exec_id,),
         ).fetchall()
-        results = []
-        for r in rows:
-            d = dict(r)
-            for field in ("input_state", "result_state"):
-                if d[field]:
-                    d[field] = json.loads(d[field])
-            results.append(d)
-        return results
+        return [self._decode_execution(r) for r in rows]
 
     def get_children(self, exec_id: str) -> List[Tuple[str, Optional[str]]]:
-        """Returns list of (child_exec_id, condition)."""
         rows = self.conn.execute(
             "SELECT to_exec_id, condition FROM edges WHERE from_exec_id = ?",
             (exec_id,),
         ).fetchall()
         return [(r["to_exec_id"], r["condition"]) for r in rows]
 
-    def get_parent_exec_ids(self, exec_id: str) -> List[str]:
+    def get_session_edges(self, session_id: str) -> List[Dict]:
         rows = self.conn.execute(
-            "SELECT from_exec_id FROM edges WHERE to_exec_id = ?",
-            (exec_id,),
-        ).fetchall()
-        return [r["from_exec_id"] for r in rows]
-
-    # ── Ready node detection ──────────────────────────────────
-
-    def get_ready_executions(self, session_id: str) -> List[Dict]:
-        """
-        Find executions that are pending and whose parents are all completed.
-        Also checks edge conditions against parent result states.
-        """
-        pending = self.conn.execute(
-            "SELECT * FROM executions WHERE session_id = ? AND status = 'pending'",
-            (session_id,),
-        ).fetchall()
-
-        ready = []
-        for p in pending:
-            parents = self.get_parents(p["id"])
-            if not parents:
-                # No parents = ready (e.g. first node after HEAD)
-                ready.append(dict(p))
-                continue
-
-            all_done = all(par["status"] == "completed" for par in parents)
-            if not all_done:
-                continue
-
-            # Check conditions on edges
-            conditions_met = True
-            for par in parents:
-                condition = par.get("condition")
-                if condition and par["result_state"]:
-                    if not par["result_state"].get(condition):
-                        conditions_met = False
-                        break
-
-            if conditions_met:
-                ready.append(dict(p))
-
-        return ready
-
-    def collect_input_state(self, exec_id: str) -> Dict[str, Any]:
-        """Collect merged input state from all completed parents."""
-        parents = self.get_parents(exec_id)
-        if not parents:
-            # Root node — use session initial state
-            ex = self.get_execution(exec_id)
-            session = self.get_session(ex["session_id"])
-            return session["initial_state"]
-
-        states = [p["result_state"] for p in parents if p["result_state"]]
-        if len(states) == 0:
-            return {}
-        if len(states) == 1:
-            return states[0]
-        # Multiple parents (parallel merge) — combine dicts
-        merged = {}
-        for s in states:
-            merged.update(s)
-        return merged
-
-    # ── Graph rewiring (for dynamic plan injection) ───────────
-
-    def get_children_exec_ids(self, exec_id: str) -> List[str]:
-        rows = self.conn.execute(
-            "SELECT to_exec_id FROM edges WHERE from_exec_id = ?",
-            (exec_id,),
-        ).fetchall()
-        return [r["to_exec_id"] for r in rows]
-
-    def rewire_after_plan_injection(
-        self,
-        parent_exec_id: str,
-        plan_start_ids: List[str],
-        plan_end_id: str,
-        session_id: str,
-    ):
-        """
-        Rewire edges after injecting a plan between a node and its successors.
-
-        Before: parent → [children]
-        After:  parent → [plan_starts] → ... → plan_end → [children]
-        """
-        # Get current children of parent
-        children = self.get_children(parent_exec_id)
-
-        # Remove old edges from parent to children
-        for child_id, _ in children:
-            self.remove_edge(parent_exec_id, child_id)
-
-        # Add edges: parent → plan starts
-        for start_id in plan_start_ids:
-            self.add_edge(session_id, parent_exec_id, start_id)
-
-        # Add edges: plan end → original children (preserve conditions)
-        for child_id, condition in children:
-            self.add_edge(session_id, plan_end_id, child_id, condition)
-
-    # ── Utilities ─────────────────────────────────────────────
-
-    def get_session_graph(self, session_id: str) -> Dict:
-        """Get full graph for debugging/visualization."""
-        execs = self.conn.execute(
-            "SELECT * FROM executions WHERE session_id = ?", (session_id,)
-        ).fetchall()
-        edges = self.conn.execute(
             "SELECT * FROM edges WHERE session_id = ?", (session_id,)
         ).fetchall()
-        return {
-            "executions": [dict(e) for e in execs],
-            "edges": [dict(e) for e in edges],
-        }
+        return [dict(r) for r in rows]
 
     def close(self):
         self.conn.close()

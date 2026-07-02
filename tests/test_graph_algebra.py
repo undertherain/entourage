@@ -17,12 +17,24 @@ from entourage.runtime import (
 from entourage.runtime.planner import resolve_node
 
 
-@pytest.fixture(params=["memory", "sqlite"])
+@pytest.fixture(params=["memory", "sqlite", "redis"])
 def store(request, tmp_path):
     if request.param == "memory":
         s = InMemoryGraphStore()
-    else:
+    elif request.param == "sqlite":
         s = SQLiteGraphStore(tmp_path / "test.db")
+    else:
+        import uuid
+
+        from entourage.runtime import RedisGraphStore
+
+        client = request.getfixturevalue("redis_client")
+        s = RedisGraphStore(
+            client=client, namespace=f"entourage-test-graph-{uuid.uuid4().hex[:8]}"
+        )
+        yield s
+        s.purge()
+        return
     yield s
     s.close()
 

@@ -11,6 +11,7 @@ from .interfaces import GraphStore, QueueMessage, ReadyQueue
 from .planner import END, HEAD, MERGE, expand_plan
 from .memory import InMemoryGraphStore, InMemoryReadyQueue
 from .redis_queue import RedisReadyQueue
+from .redis_store import RedisGraphStore
 from .store import DEFAULT_DB_PATH, SQLiteGraphStore
 from .queue import QueueRuntime
 from .local import Runtime
@@ -26,6 +27,7 @@ __all__ = [
     "InMemoryGraphStore",
     "InMemoryReadyQueue",
     "RedisReadyQueue",
+    "RedisGraphStore",
     "SQLiteGraphStore",
     "DEFAULT_DB_PATH",
     "QueueRuntime",

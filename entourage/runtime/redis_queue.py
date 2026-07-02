@@ -65,7 +65,7 @@ class RedisReadyQueue(ReadyQueue):
         self,
         client=None,
         url: str = "redis://localhost:6379/0",
-        namespace: str = "entourage",
+        namespace: str = "entourage:queue",
         ttl_seconds: int = QUEUE_TTL_SECONDS,
         reclaim_after: float = 300.0,
         poll_interval: float = 0.1,

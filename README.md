@@ -129,9 +129,10 @@ More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
 
 - **`entourage/flow.py`** — the combinators: `Sequence`, `Parallel`, `Conditional`.
 - **`entourage/runtime/`** — the scheduler. One engine (`QueueRuntime`) behind two backend
-  seams: `GraphStore` (the persistent execution graph — in-memory and SQLite backends today,
-  a graph store planned) and `ReadyQueue` (pointers to ready work — in-memory, Redis with
-  fair-share claiming per session, and AWS SQS).
+  seams: `GraphStore` (the persistent execution graph — in-memory, SQLite, and Redis) and
+  `ReadyQueue` (pointers to ready work — in-memory, Redis with fair-share claiming per
+  session, and AWS SQS). The Redis pair puts the whole runtime state on one server:
+  a durable, multi-worker deployment with ~3 ms/node orchestration overhead.
   The in-memory pair powers the local `Runtime` used by the examples; any durable
   store+queue combination gives fault-tolerant, resumable runs. The graph algebra (ready
   detection, fan-in joins, plan splicing) is shared code, tested identically across

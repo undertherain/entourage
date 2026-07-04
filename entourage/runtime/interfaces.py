@@ -16,8 +16,13 @@ Two seams:
 
 Execution dicts carry at least: ``id``, ``session_id``, ``node_name``,
 ``status`` (pending | running | completed | failed), ``input_state``,
-``result_state``. Parent dicts returned by ``get_parents`` additionally
-carry the ``condition`` of the connecting edge (or None).
+``result_state``, ``attempts`` (times the execution entered running),
+``policy`` (per-execution retry/timeout policy dict, or None),
+``last_error`` (message of the most recent failed attempt, or None) and
+``retry_at`` (epoch seconds before which a retrying execution must not
+run, or None).
+Parent dicts returned by ``get_parents`` additionally carry the
+``condition`` of the connecting edge (or None).
 """
 
 from abc import ABC, abstractmethod
@@ -53,9 +58,18 @@ class GraphStore(ABC):
 
     @abstractmethod
     def add_execution(
-        self, session_id: str, node_name: str, exec_id: str = None
+        self,
+        session_id: str,
+        node_name: str,
+        exec_id: str = None,
+        policy: Dict[str, Any] = None,
     ) -> str:
-        """Create a pending execution; return its id."""
+        """Create a pending execution; return its id.
+
+        ``policy`` is an optional retry/timeout policy dict (keys:
+        max_attempts, timeout, retry_delay) stored with the execution so
+        every worker honors it.
+        """
 
     @abstractmethod
     def get_execution(self, exec_id: str) -> Optional[Dict]:
@@ -69,15 +83,26 @@ class GraphStore(ABC):
 
     @abstractmethod
     def mark_running(self, exec_id: str, input_state: Dict[str, Any]):
-        ...
+        """Set status running and increment the attempt counter."""
 
     @abstractmethod
     def mark_completed(self, exec_id: str, result_state: Dict[str, Any]):
         ...
 
     @abstractmethod
+    def mark_retrying(self, exec_id: str, error: str = None, retry_at: float = None):
+        """Return a failed attempt to pending for redelivery.
+
+        Keeps the attempt counter, records ``error`` as ``last_error`` and
+        ``retry_at`` as the earliest time the next attempt may run. The
+        engine enforces ``retry_at`` on the execution itself, because with
+        at-least-once transports a duplicate delivery (startup recovery,
+        redelivery) would otherwise jump the delay.
+        """
+
+    @abstractmethod
     def mark_failed(self, exec_id: str, error: str = None):
-        ...
+        """Terminal failure: no further attempts will be made."""
 
     # ── Edges ─────────────────────────────────────────────────
 

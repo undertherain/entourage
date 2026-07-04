@@ -1,42 +1,12 @@
 """
 Graph-algebra tests: plan expansion, ready detection, joins, gates, and
-dynamic plan injection — parametrized over GraphStore backends so every
-backend passes the same suite.
+dynamic plan injection — parametrized over GraphStore and ReadyQueue
+backends (fixtures in conftest.py) so every backend passes the same suite.
 """
 
-import pytest
-
 from entourage.flow import Conditional, Parallel, Sequence
-from entourage.runtime import (
-    InMemoryGraphStore,
-    InMemoryReadyQueue,
-    QueueRuntime,
-    Runtime,
-    SQLiteGraphStore,
-)
+from entourage.runtime import Runtime
 from entourage.runtime.planner import resolve_node
-
-
-@pytest.fixture(params=["memory", "sqlite", "redis"])
-def store(request, tmp_path):
-    if request.param == "memory":
-        s = InMemoryGraphStore()
-    elif request.param == "sqlite":
-        s = SQLiteGraphStore(tmp_path / "test.db")
-    else:
-        import uuid
-
-        from entourage.runtime import RedisGraphStore
-
-        client = request.getfixturevalue("redis_client")
-        s = RedisGraphStore(
-            client=client, namespace=f"entourage-test-graph-{uuid.uuid4().hex[:8]}"
-        )
-        yield s
-        s.purge()
-        return
-    yield s
-    s.close()
 
 
 class Recorder:
@@ -56,36 +26,6 @@ class Recorder:
 
     def registry(self, *names):
         return {n: self.node(n) for n in names}
-
-
-@pytest.fixture(params=["memory", "redis"], ids=["qmem", "qredis"])
-def make_runtime(request):
-    """Runtime factory, parametrized over queue backends — every queue
-    backend must pass the same graph-algebra suite as the in-memory one."""
-    if request.param == "redis":
-        import uuid
-
-        from entourage.runtime.redis_queue import RedisReadyQueue
-
-        client = request.getfixturevalue("redis_client")
-        queues = []
-
-        def factory(store, registry):
-            q = RedisReadyQueue(
-                client=client,
-                namespace=f"entourage-test-{uuid.uuid4().hex[:8]}",
-                poll_interval=0.005,
-            )
-            queues.append(q)
-            return QueueRuntime(node_registry=registry, store=store, queue=q)
-
-        yield factory
-        for q in queues:
-            q.purge()
-    else:
-        yield lambda store, registry: QueueRuntime(
-            node_registry=registry, store=store, queue=InMemoryReadyQueue()
-        )
 
 
 def run_to_completion(runtime):
@@ -258,8 +198,9 @@ def test_node_failure_marks_execution_failed(store, make_runtime):
     assert len(failed) == 1
     assert failed[0]["node_name"] == "boom"
     assert "kaput" in failed[0]["result_state"]["error"]
-    # no retry policy yet: session stays running (TODO C9)
-    assert store.get_session(sid)["status"] == "running"
+    # default policy is single-attempt: terminal failure fails the session
+    assert failed[0]["attempts"] == 1
+    assert store.get_session(sid)["status"] == "failed"
 
 
 def test_crash_recovery_resumes_ready_nodes(store, make_runtime):
@@ -284,6 +225,7 @@ def test_unknown_node_fails_execution(store, make_runtime):
 
     failed = store.get_session_executions(sid, status="failed")
     assert [f["node_name"] for f in failed] == ["ghost"]
+    assert store.get_session(sid)["status"] == "failed"
 
 
 # ── Callable nodes & the local Runtime facade ─────────────────

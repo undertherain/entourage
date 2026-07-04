@@ -61,7 +61,11 @@ class InMemoryGraphStore(GraphStore):
     # ── Executions ────────────────────────────────────────────
 
     def add_execution(
-        self, session_id: str, node_name: str, exec_id: str = None
+        self,
+        session_id: str,
+        node_name: str,
+        exec_id: str = None,
+        policy: Dict[str, Any] = None,
     ) -> str:
         if exec_id is None:
             exec_id = uuid.uuid4().hex
@@ -72,6 +76,10 @@ class InMemoryGraphStore(GraphStore):
             "status": "pending",
             "input_state": None,
             "result_state": None,
+            "attempts": 0,
+            "policy": copy.deepcopy(policy) if policy else None,
+            "last_error": None,
+            "retry_at": None,
             "created_at": time.time(),
             "started_at": None,
             "completed_at": None,
@@ -96,6 +104,7 @@ class InMemoryGraphStore(GraphStore):
         ex = self._executions[exec_id]
         ex["status"] = "running"
         ex["input_state"] = copy.deepcopy(input_state)
+        ex["attempts"] = ex.get("attempts", 0) + 1
         ex["started_at"] = time.time()
 
     def mark_completed(self, exec_id: str, result_state: Dict[str, Any]):
@@ -104,10 +113,17 @@ class InMemoryGraphStore(GraphStore):
         ex["result_state"] = copy.deepcopy(result_state)
         ex["completed_at"] = time.time()
 
+    def mark_retrying(self, exec_id: str, error: str = None, retry_at: float = None):
+        ex = self._executions[exec_id]
+        ex["status"] = "pending"
+        ex["last_error"] = error
+        ex["retry_at"] = retry_at
+
     def mark_failed(self, exec_id: str, error: str = None):
         ex = self._executions[exec_id]
         ex["status"] = "failed"
         ex["result_state"] = {"error": error}
+        ex["last_error"] = error
         ex["completed_at"] = time.time()
 
     # ── Edges ─────────────────────────────────────────────────

@@ -24,9 +24,10 @@ nothing is injected.
 """
 
 import logging
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 from ..flow import Parallel, Sequence
 from .interfaces import GraphStore, ReadyQueue
@@ -40,6 +41,41 @@ logger = logging.getLogger(__name__)
 PipelineTemplate = Callable[[Dict[str, Any]], Union[str, Sequence, Parallel]]
 
 
+class NodeTimeoutError(TimeoutError):
+    """A node attempt exceeded its wall-clock timeout."""
+
+
+def _call_with_timeout(fn: Callable, input_state: Dict, timeout: Optional[float]):
+    """
+    Call ``fn(input_state)``, raising NodeTimeoutError after ``timeout`` seconds.
+
+    The call runs in a daemon thread so the engine can move on when it hangs.
+    Python threads cannot be killed, so a timed-out call keeps running in the
+    background until it returns on its own — its result is discarded. Real
+    isolation (spawn process, terminate→kill) is the worker-hardening step
+    (TODO B6); this gives the engine timeout *semantics* backends can rely on.
+    """
+    if not timeout:
+        return fn(input_state)
+
+    box: Dict[str, Any] = {}
+
+    def target():
+        try:
+            box["result"] = fn(input_state)
+        except BaseException as e:  # noqa: BLE001 — re-raised in the caller
+            box["error"] = e
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise NodeTimeoutError(f"timed out after {timeout}s")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
 class QueueRuntime:
     def __init__(
         self,
@@ -51,6 +87,7 @@ class QueueRuntime:
         db_path: Path = DEFAULT_DB_PATH,
     ):
         self.node_registry = node_registry or {}
+        self.node_policies: Dict[str, Dict[str, Any]] = {}
         self.pipelines: Dict[str, PipelineTemplate] = {}
         self.store = store if store is not None else SQLiteGraphStore(db_path)
         if queue is None:
@@ -61,9 +98,32 @@ class QueueRuntime:
 
     # ── Registration ──────────────────────────────────────────
 
-    def register_node(self, name: str, fn: Callable):
-        """Register a named node callable."""
+    def register_node(
+        self,
+        name: str,
+        fn: Callable,
+        max_attempts: int = None,
+        timeout: float = None,
+        retry_delay: float = None,
+    ):
+        """Register a named node callable, optionally with a default policy.
+
+        The policy applies to every execution of this node; a per-leaf
+        ``flow.Node(...)`` wrapper overrides it field by field. Defaults:
+        max_attempts=1 (no retry), timeout=None (unbounded), retry_delay=0.
+        """
         self.node_registry[name] = fn
+        policy = {
+            k: v
+            for k, v in (
+                ("max_attempts", max_attempts),
+                ("timeout", timeout),
+                ("retry_delay", retry_delay),
+            )
+            if v is not None
+        }
+        if policy:
+            self.node_policies[name] = policy
 
     def register_pipeline(self, trigger_name: str, template: PipelineTemplate):
         """
@@ -140,6 +200,15 @@ class QueueRuntime:
             )
             return
 
+        # retry_delay enforcement lives on the execution, not the message:
+        # with at-least-once transports a duplicate delivery (startup
+        # recovery, redelivery) would otherwise jump the delay.
+        retry_at = execution.get("retry_at")
+        if retry_at and time.time() < retry_at:
+            time.sleep(min(retry_at - time.time(), 0.05))
+            self._send_to_queue(exec_id, session_id, not_before=retry_at)
+            return
+
         node_name = execution["node_name"]
 
         # Handle END sentinel
@@ -174,7 +243,17 @@ class QueueRuntime:
         if node_name not in self.node_registry:
             logger.error("Node '%s' not in registry", node_name)
             self.store.mark_failed(exec_id, f"Unknown node: {node_name}")
+            self.store.fail_session(session_id)
             return
+
+        # Effective policy: per-execution (flow.Node wrapper) overrides the
+        # registered default field by field.
+        policy = {
+            **self.node_policies.get(node_name, {}),
+            **(execution.get("policy") or {}),
+        }
+        attempt = execution.get("attempts", 0) + 1
+        max_attempts = policy.get("max_attempts", 1)
 
         # Collect input state from parents
         input_state = self.store.collect_input_state(exec_id)
@@ -182,7 +261,7 @@ class QueueRuntime:
 
         try:
             fn = self.node_registry[node_name]
-            result = fn(input_state)
+            result = _call_with_timeout(fn, input_state, policy.get("timeout"))
 
             # Support two return styles:
             # 1. (new_state, plan) — Entourage style
@@ -206,8 +285,23 @@ class QueueRuntime:
             self._enqueue_ready(session_id)
 
         except Exception as e:
-            logger.exception("Node '%s' failed: %s", node_name, e)
-            self.store.mark_failed(exec_id, str(e))
+            if attempt < max_attempts:
+                delay = policy.get("retry_delay", 0)
+                logger.warning(
+                    "Node '%s' failed on attempt %d/%d: %s — retrying%s",
+                    node_name, attempt, max_attempts, e,
+                    f" in {delay}s" if delay else "",
+                )
+                retry_at = time.time() + delay if delay else None
+                self.store.mark_retrying(exec_id, str(e), retry_at=retry_at)
+                self._send_to_queue(exec_id, session_id, not_before=retry_at)
+            else:
+                logger.exception(
+                    "Node '%s' failed terminally after %d attempt(s): %s",
+                    node_name, attempt, e,
+                )
+                self.store.mark_failed(exec_id, str(e))
+                self.store.fail_session(session_id)
 
     # ── Queue operations ──────────────────────────────────────
 
@@ -217,13 +311,18 @@ class QueueRuntime:
         for ex in ready:
             self._send_to_queue(ex["id"], session_id)
 
-    def _send_to_queue(self, exec_id: str, session_id: str):
-        self.queue.send({
+    def _send_to_queue(
+        self, exec_id: str, session_id: str, not_before: float = None
+    ):
+        payload = {
             "type": "execute",
             "exec_id": exec_id,
             "session_id": session_id,
             "time_created": time.time(),
-        })
+        }
+        if not_before is not None:
+            payload["not_before"] = not_before
+        self.queue.send(payload)
         logger.debug("Enqueued execution %s", exec_id)
 
     def send_trigger(self, trigger: str, state: Dict[str, Any]):
@@ -249,6 +348,13 @@ class QueueRuntime:
             self.start_session(body["trigger"], body.get("state", {}))
 
         elif msg_type == "execute":
+            not_before = body.get("not_before")
+            if not_before and time.time() < not_before:
+                # Not due yet (retry_delay). Best-effort delay: nap briefly,
+                # put it back, poll again. Durable timers are TODO C7.
+                time.sleep(min(not_before - time.time(), 0.05))
+                self.queue.send(body)
+                return
             self._execute_node(body["exec_id"], body["session_id"])
 
         elif msg_type == "approval":

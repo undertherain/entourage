@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .interfaces import GraphStore
 
 _JSON_FIELDS = ("input_state", "result_state")
-_FLOAT_FIELDS = ("created_at", "started_at", "completed_at")
+_FLOAT_FIELDS = ("created_at", "started_at", "completed_at", "retry_at")
 
 
 class RedisGraphStore(GraphStore):
@@ -83,6 +83,9 @@ class RedisGraphStore(GraphStore):
             "session_id": d["session_id"],
             "node_name": d["node_name"],
             "status": d["status"],
+            "attempts": int(d.get("attempts", 0)),
+            "policy": json.loads(d["policy"]) if d.get("policy") else None,
+            "last_error": d.get("last_error") or None,
         }
         for f in _JSON_FIELDS:
             out[f] = json.loads(d[f]) if d.get(f) else None
@@ -137,18 +140,26 @@ class RedisGraphStore(GraphStore):
     # ── Executions ────────────────────────────────────────────
 
     def add_execution(
-        self, session_id: str, node_name: str, exec_id: str = None
+        self,
+        session_id: str,
+        node_name: str,
+        exec_id: str = None,
+        policy: Dict[str, Any] = None,
     ) -> str:
         if exec_id is None:
             exec_id = uuid.uuid4().hex
-        pipe = self._r.pipeline()
-        pipe.hset(self._ekey(exec_id), mapping={
+        mapping = {
             "id": exec_id,
             "session_id": session_id,
             "node_name": node_name,
             "status": "pending",
+            "attempts": 0,
             "created_at": time.time(),
-        })
+        }
+        if policy:
+            mapping["policy"] = json.dumps(policy)
+        pipe = self._r.pipeline()
+        pipe.hset(self._ekey(exec_id), mapping=mapping)
         pipe.sadd(self._execs_key(session_id), exec_id)
         pipe.sadd(self._pending_key(session_id), exec_id)
         pipe.execute()
@@ -179,10 +190,14 @@ class RedisGraphStore(GraphStore):
             execs = [ex for ex in execs if ex["status"] == status]
         return execs
 
-    def _set_status(self, exec_id: str, mapping: Dict[str, Any]):
+    def _set_status(
+        self, exec_id: str, mapping: Dict[str, Any], incr_attempts: bool = False
+    ):
         session_id = self._r.hget(self._ekey(exec_id), "session_id")
         pipe = self._r.pipeline()
         pipe.hset(self._ekey(exec_id), mapping=mapping)
+        if incr_attempts:
+            pipe.hincrby(self._ekey(exec_id), "attempts", 1)
         if session_id:
             pipe.srem(self._pending_key(session_id), exec_id)
         pipe.execute()
@@ -192,7 +207,7 @@ class RedisGraphStore(GraphStore):
             "status": "running",
             "input_state": json.dumps(input_state),
             "started_at": time.time(),
-        })
+        }, incr_attempts=True)
 
     def mark_completed(self, exec_id: str, result_state: Dict[str, Any]):
         self._set_status(exec_id, {
@@ -201,10 +216,23 @@ class RedisGraphStore(GraphStore):
             "completed_at": time.time(),
         })
 
+    def mark_retrying(self, exec_id: str, error: str = None, retry_at: float = None):
+        session_id = self._r.hget(self._ekey(exec_id), "session_id")
+        pipe = self._r.pipeline()
+        pipe.hset(self._ekey(exec_id), mapping={
+            "status": "pending",
+            "last_error": error or "",
+            "retry_at": retry_at or "",
+        })
+        if session_id:
+            pipe.sadd(self._pending_key(session_id), exec_id)
+        pipe.execute()
+
     def mark_failed(self, exec_id: str, error: str = None):
         self._set_status(exec_id, {
             "status": "failed",
             "result_state": json.dumps({"error": error}),
+            "last_error": error or "",
             "completed_at": time.time(),
         })
 

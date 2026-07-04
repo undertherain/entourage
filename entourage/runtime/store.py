@@ -50,6 +50,10 @@ class SQLiteGraphStore(GraphStore):
                 status TEXT NOT NULL DEFAULT 'pending',
                 input_state TEXT,
                 result_state TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                policy TEXT,
+                last_error TEXT,
+                retry_at REAL,
                 created_at REAL NOT NULL,
                 started_at REAL,
                 completed_at REAL
@@ -68,12 +72,27 @@ class SQLiteGraphStore(GraphStore):
             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_exec_id);
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_exec_id);
         """)
+        # Migrate pre-retry-policy databases in place.
+        existing = {
+            r["name"]
+            for r in self.conn.execute("PRAGMA table_info(executions)")
+        }
+        for column, decl in (
+            ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("policy", "TEXT"),
+            ("last_error", "TEXT"),
+            ("retry_at", "REAL"),
+        ):
+            if column not in existing:
+                self.conn.execute(
+                    f"ALTER TABLE executions ADD COLUMN {column} {decl}"
+                )
         self.conn.commit()
 
     @staticmethod
     def _decode_execution(row) -> Dict:
         d = dict(row)
-        for field in ("input_state", "result_state"):
+        for field in ("input_state", "result_state", "policy"):
             if d.get(field):
                 d[field] = json.loads(d[field])
         return d
@@ -123,14 +142,19 @@ class SQLiteGraphStore(GraphStore):
     # ── Executions ────────────────────────────────────────────
 
     def add_execution(
-        self, session_id: str, node_name: str, exec_id: str = None
+        self,
+        session_id: str,
+        node_name: str,
+        exec_id: str = None,
+        policy: Dict[str, Any] = None,
     ) -> str:
         if exec_id is None:
             exec_id = uuid.uuid4().hex
         self.conn.execute(
-            "INSERT INTO executions (id, session_id, node_name, status, created_at) "
-            "VALUES (?, ?, ?, 'pending', ?)",
-            (exec_id, session_id, node_name, time.time()),
+            "INSERT INTO executions (id, session_id, node_name, status, policy, created_at) "
+            "VALUES (?, ?, ?, 'pending', ?, ?)",
+            (exec_id, session_id, node_name,
+             json.dumps(policy) if policy else None, time.time()),
         )
         self.conn.commit()
         return exec_id
@@ -157,8 +181,8 @@ class SQLiteGraphStore(GraphStore):
 
     def mark_running(self, exec_id: str, input_state: Dict[str, Any]):
         self.conn.execute(
-            "UPDATE executions SET status = 'running', input_state = ?, started_at = ? "
-            "WHERE id = ?",
+            "UPDATE executions SET status = 'running', input_state = ?, "
+            "attempts = attempts + 1, started_at = ? WHERE id = ?",
             (json.dumps(input_state), time.time(), exec_id),
         )
         self.conn.commit()
@@ -171,11 +195,19 @@ class SQLiteGraphStore(GraphStore):
         )
         self.conn.commit()
 
+    def mark_retrying(self, exec_id: str, error: str = None, retry_at: float = None):
+        self.conn.execute(
+            "UPDATE executions SET status = 'pending', last_error = ?, retry_at = ? "
+            "WHERE id = ?",
+            (error, retry_at, exec_id),
+        )
+        self.conn.commit()
+
     def mark_failed(self, exec_id: str, error: str = None):
         self.conn.execute(
-            "UPDATE executions SET status = 'failed', result_state = ?, completed_at = ? "
-            "WHERE id = ?",
-            (json.dumps({"error": error}), time.time(), exec_id),
+            "UPDATE executions SET status = 'failed', result_state = ?, "
+            "last_error = ?, completed_at = ? WHERE id = ?",
+            (json.dumps({"error": error}), error, time.time(), exec_id),
         )
         self.conn.commit()
 

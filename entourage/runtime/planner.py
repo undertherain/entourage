@@ -2,8 +2,9 @@
 Plan expansion — the one shared implementation of the graph algebra's
 "plan → executions + edges" step, used by every runtime/backend combination.
 
-A plan is a node reference (string name or callable), a ``Sequence``, a
-``Parallel``, or a ``Conditional`` (see ``entourage.flow``). Expansion writes
+A plan is a node reference (string name or callable), a policy-carrying
+``Node`` wrapper, a ``Sequence``, a ``Parallel``, or a ``Conditional``
+(see ``entourage.flow``). Expansion writes
 executions and edges into a ``GraphStore`` and returns the plan's entry and
 exit points so the caller can wire it into the surrounding graph.
 """
@@ -11,7 +12,7 @@ exit points so the caller can wire it into the surrounding graph.
 import uuid
 from typing import Any, Callable, Dict, List, Tuple, Union
 
-from ..flow import Conditional, Parallel, Sequence
+from ..flow import Conditional, Node, Parallel, Sequence
 from .interfaces import GraphStore
 
 # Sentinel node names
@@ -20,7 +21,7 @@ END = "__END__"
 MERGE = "__MERGE__"
 GATE_PREFIX = "__GATE__"
 
-Plan = Union[str, Callable, Sequence, Parallel, Conditional]
+Plan = Union[str, Callable, Node, Sequence, Parallel, Conditional]
 
 
 def resolve_node(item: Union[str, Callable], registry: Dict[str, Callable]) -> str:
@@ -88,6 +89,13 @@ def expand_plan(
             all_starts.extend(starts)
             store.add_edge(session_id, end, merge_id)
         return all_starts, merge_id
+
+    elif isinstance(plan, Node):
+        # Policy-carrying leaf: the policy is stored on the execution itself,
+        # so every worker honors it regardless of who expanded the plan.
+        name = resolve_node(plan.node, registry)
+        exec_id = store.add_execution(session_id, name, policy=plan.policy or None)
+        return [exec_id], exec_id
 
     elif isinstance(plan, str) or callable(plan):
         name = resolve_node(plan, registry)

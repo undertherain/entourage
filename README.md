@@ -45,6 +45,15 @@ Parallel(a, b, c)        # fork-join; resulting states are merged
 Conditional(key, plan)   # run plan only if state[key] is truthy
 ```
 
+Any leaf can carry an execution policy — retries, per-attempt timeout, retry delay:
+
+```python
+Sequence(fetch, Node(call_api, max_attempts=3, timeout=10, retry_delay=1), report)
+```
+
+The policy is stored on the execution itself, so every worker honors it; a node that
+exhausts its attempts fails its session terminally (`examples/retry_timeout.py`).
+
 The runtime splices the returned plan into a **persistent execution graph**, between the
 current node and whatever was scheduled to follow it. Because the plan is data on disk — not
 frames on a call stack — a run can be paused, persisted, resumed on another machine, retried,
@@ -127,7 +136,8 @@ More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
 
 ## Architecture
 
-- **`entourage/flow.py`** — the combinators: `Sequence`, `Parallel`, `Conditional`.
+- **`entourage/flow.py`** — the combinators: `Sequence`, `Parallel`, `Conditional`, and the
+  policy-carrying `Node` leaf (retry/timeout controls).
 - **`entourage/runtime/`** — the scheduler. One engine (`QueueRuntime`) behind two backend
   seams: `GraphStore` (the persistent execution graph — in-memory, SQLite, and Redis) and
   `ReadyQueue` (pointers to ready work — in-memory, Redis with fair-share claiming per

@@ -29,12 +29,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
-from ..flow import Parallel, Sequence
+from ..flow import Parallel, Sequence, RecursionLimitExceeded
 from .interfaces import GraphStore, ReadyQueue
 from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan, resolve_node
 from .store import DEFAULT_DB_PATH, SQLiteGraphStore
 
 logger = logging.getLogger(__name__)
+
+MAX_SESSION_NODES = 1000
 
 
 # Type for pipeline templates: callable that returns a plan (Sequence/Parallel/str)
@@ -275,6 +277,11 @@ class QueueRuntime:
 
             # If the node returned a dynamic plan, inject it
             if plan is not None:
+                if len(self.store.get_session_executions(session_id)) >= MAX_SESSION_NODES:
+                    raise RecursionLimitExceeded(
+                        f"Session {session_id} exceeded global hard limit of {MAX_SESSION_NODES} executions"
+                    )
+
                 plan_starts, plan_end = expand_plan(
                     self.store, session_id, plan, self.node_registry
                 )
@@ -283,6 +290,11 @@ class QueueRuntime:
                 )
 
             self._enqueue_ready(session_id)
+
+        except RecursionLimitExceeded as e:
+            logger.exception("Recursion limit exceeded for node '%s': %s", node_name, e)
+            self.store.mark_failed(exec_id, str(e))
+            self.store.fail_session(session_id)
 
         except Exception as e:
             if attempt < max_attempts:

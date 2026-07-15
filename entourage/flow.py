@@ -12,6 +12,10 @@ Schedule = Any  # Will be Sequence, Parallel, or Node
 class ControlFlow:
     pass
 
+class RecursionLimitExceeded(Exception):
+    """Raised when a node exceeds its max_invocations limit."""
+    pass
+
 
 class Node(ControlFlow):
     """A plan leaf (node name or callable) with an execution policy.
@@ -40,9 +44,12 @@ class Node(ControlFlow):
         max_attempts: Optional[int] = None,
         timeout: Optional[float] = None,
         retry_delay: Optional[float] = None,
+        max_invocations: Optional[int] = None,
     ):
         if max_attempts is not None and max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
+        if max_invocations is not None and max_invocations < 1:
+            raise ValueError("max_invocations must be >= 1")
         self.node = node
         self.policy = {
             k: v
@@ -50,6 +57,7 @@ class Node(ControlFlow):
                 ("max_attempts", max_attempts),
                 ("timeout", timeout),
                 ("retry_delay", retry_delay),
+                ("max_invocations", max_invocations),
             )
             if v is not None
         }

@@ -12,7 +12,7 @@ exit points so the caller can wire it into the surrounding graph.
 import uuid
 from typing import Any, Callable, Dict, List, Tuple, Union
 
-from ..flow import Conditional, Node, Parallel, Sequence
+from ..flow import Conditional, Node, Parallel, Sequence, RecursionLimitExceeded
 from .interfaces import GraphStore
 
 # Sentinel node names
@@ -94,6 +94,14 @@ def expand_plan(
         # Policy-carrying leaf: the policy is stored on the execution itself,
         # so every worker honors it regardless of who expanded the plan.
         name = resolve_node(plan.node, registry)
+        
+        if plan.policy and plan.policy.get("max_invocations"):
+            max_invocations = plan.policy["max_invocations"]
+            executions = store.get_session_executions(session_id)
+            count = sum(1 for ex in executions if ex["node_name"] == name)
+            if count >= max_invocations:
+                raise RecursionLimitExceeded(f"Node '{name}' exceeded max_invocations ({max_invocations})")
+
         exec_id = store.add_execution(session_id, name, policy=plan.policy or None)
         return [exec_id], exec_id
 

@@ -94,7 +94,7 @@ class RedisReadyQueue(ReadyQueue):
 
     @staticmethod
     def _fairness_key(payload: Dict[str, Any]) -> str:
-        return payload.get("session_id") or SYSTEM_KEY
+        return payload.get("session_id") or payload.get("serial_key") or SYSTEM_KEY
 
     # ── ReadyQueue interface ──────────────────────────────────
 

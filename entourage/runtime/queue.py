@@ -337,36 +337,66 @@ class QueueRuntime:
         self.queue.send(payload)
         logger.debug("Enqueued execution %s", exec_id)
 
-    def send_trigger(self, trigger: str, state: Dict[str, Any]):
+    def send_trigger(
+        self,
+        trigger: str,
+        state: Dict[str, Any],
+        serial_key: str = None,
+    ):
         """
         Send a trigger message to the queue.
 
-        This is what external services call — e.g. Telegram listener.
+        This is what external services call — e.g. a Telegram listener.
+        Triggers sharing ``serial_key`` never create overlapping sessions:
+        while one is running, later triggers remain queued.  This is useful
+        for conversation IDs, incident IDs, and other ordered event streams.
         """
-        self.queue.send({
+        payload = {
             "type": "trigger",
             "trigger": trigger,
             "state": state,
             "time_created": time.time(),
-        })
+        }
+        if serial_key is not None:
+            payload["serial_key"] = serial_key
+        self.queue.send(payload)
         logger.info("Sent trigger '%s' to queue", trigger)
+
+    def _serial_key_is_running(self, serial_key: str) -> bool:
+        return any(
+            session.get("initial_state", {}).get("_entourage_serial_key") == serial_key
+            for session in self.store.get_running_sessions()
+        )
 
     # ── Main loop ─────────────────────────────────────────────
 
     def _handle_message(self, body: Dict):
         msg_type = body.get("type")
 
+        not_before = body.get("not_before")
+        if not_before and time.time() < not_before:
+            # ReadyQueue intentionally has no timer contract yet. Requeueing
+            # preserves the event on every backend; the short sleep prevents
+            # a deferred trigger from becoming a hot loop locally.
+            time.sleep(min(not_before - time.time(), 0.05))
+            self.queue.send(body)
+            return
+
         if msg_type == "trigger":
-            self.start_session(body["trigger"], body.get("state", {}))
+            serial_key = body.get("serial_key")
+            if serial_key and self._serial_key_is_running(serial_key):
+                deferred = {**body, "not_before": time.time() + 0.1}
+                self.queue.send(deferred)
+                logger.debug("Deferred trigger for busy serial key %s", serial_key)
+                return
+            state = dict(body.get("state", {}))
+            if serial_key:
+                # Kept with the session so all store backends can recover the
+                # serialization lock after a worker restart.
+                state["_entourage_serial_key"] = serial_key
+            self.start_session(body["trigger"], state)
 
         elif msg_type == "execute":
-            not_before = body.get("not_before")
-            if not_before and time.time() < not_before:
-                # Not due yet (retry_delay). Best-effort delay: nap briefly,
-                # put it back, poll again. Durable timers are TODO C7.
-                time.sleep(min(not_before - time.time(), 0.05))
-                self.queue.send(body)
-                return
             self._execute_node(body["exec_id"], body["session_id"])
 
         elif msg_type == "approval":

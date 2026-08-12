@@ -132,6 +132,31 @@ python3 examples/cli.py --debug
 
 More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
 
+### Minimal Telegram bot
+
+`examples/telegram_simple.py` is a small continuous-conversation demo. Each
+Telegram update pushes a `telegram_message` trigger onto Entourage's queue;
+the listener never calls the model directly. The workflow stores incoming and
+successfully delivered outgoing turns under `data/telegram-demo/history/`, so
+Telegram is transport rather than conversation storage.
+
+The chat ID is passed as the trigger's `serial_key`. If another message arrives
+while that chat's session is still running, it remains queued and starts only
+after the current session finishes; different chats can progress independently.
+
+```bash
+export TELEGRAM_BOT_TOKEN=...                # token from BotFather
+export TELEGRAM_ALLOWED_CHAT_IDS=123456789   # comma-separated; unset denies all
+export OPENAI_API_KEY=...
+python3 -m examples.telegram_simple
+```
+
+Send `/new` to archive the current live history and start with empty context.
+The demo uses an in-memory trigger queue for a one-process quick start and a
+persistent SQLite execution graph. Swap in the Redis queue/store pair when the
+listener and workers need to be separate processes or queued triggers must
+survive a process restart.
+
 ---
 
 ## Architecture

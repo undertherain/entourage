@@ -82,7 +82,7 @@ def respond(state):
     )
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     result = client.chat.completions.create(
-        model=os.environ.get("RESPONSE_MODEL", "gpt-4o-mini"),
+        model=os.environ.get("RESPONSE_MODEL", "gpt-5.4-mini"),
         messages=messages,
     )
     state["response"] = result.choices[0].message.content

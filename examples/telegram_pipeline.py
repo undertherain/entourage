@@ -44,7 +44,7 @@ def triage_message(state):
     messages += _history_to_llm(state)
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5.4-mini",
         messages=messages,
         max_tokens=50,
         temperature=0,
@@ -66,7 +66,7 @@ def generate_response(state):
     messages += _history_to_llm(state)
 
     response = client.chat.completions.create(
-        model=os.environ.get("RESPONSE_MODEL", "gpt-4o-mini"),
+        model=os.environ.get("RESPONSE_MODEL", "gpt-5.4-mini"),
         messages=messages,
     )
     state["response"] = response.choices[0].message.content

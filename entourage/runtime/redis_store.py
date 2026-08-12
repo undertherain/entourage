@@ -95,14 +95,40 @@ class RedisGraphStore(GraphStore):
 
     # ── Sessions ──────────────────────────────────────────────
 
-    def create_session(self, trigger: str, initial_state: Dict[str, Any]) -> str:
+    def create_session(
+        self, trigger: str, initial_state: Dict[str, Any], serial_key: str = None
+    ) -> Optional[str]:
         session_id = uuid.uuid4().hex
+        if serial_key is not None:
+            created = self._r.eval(
+                """
+                if redis.call('exists', KEYS[1]) == 1 then return 0 end
+                redis.call('set', KEYS[1], ARGV[1])
+                redis.call('hset', KEYS[2],
+                    'id', ARGV[1], 'trigger', ARGV[2], 'status', 'running',
+                    'initial_state', ARGV[3], 'serial_key', ARGV[4],
+                    'created_at', ARGV[5])
+                redis.call('sadd', KEYS[3], ARGV[1])
+                return 1
+                """,
+                3,
+                f"{self.namespace}:serial:{serial_key}",
+                self._skey(session_id),
+                self._running_key(),
+                session_id,
+                trigger,
+                json.dumps(initial_state),
+                serial_key,
+                time.time(),
+            )
+            return session_id if created else None
         pipe = self._r.pipeline()
         pipe.hset(self._skey(session_id), mapping={
             "id": session_id,
             "trigger": trigger,
             "status": "running",
             "initial_state": json.dumps(initial_state),
+            "serial_key": "",
             "created_at": time.time(),
         })
         pipe.sadd(self._running_key(), session_id)
@@ -114,17 +140,21 @@ class RedisGraphStore(GraphStore):
         if not d:
             return None
         d["initial_state"] = json.loads(d["initial_state"])
+        d["serial_key"] = d.get("serial_key") or None
         d["created_at"] = float(d["created_at"])
         d["completed_at"] = float(d["completed_at"]) if d.get("completed_at") else None
         return d
 
     def _finish_session(self, session_id: str, status: str):
+        session = self.get_session(session_id)
         pipe = self._r.pipeline()
         pipe.hset(self._skey(session_id), mapping={
             "status": status,
             "completed_at": time.time(),
         })
         pipe.srem(self._running_key(), session_id)
+        if session and session.get("serial_key"):
+            pipe.delete(f"{self.namespace}:serial:{session['serial_key']}")
         pipe.execute()
 
     def complete_session(self, session_id: str):

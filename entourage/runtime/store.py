@@ -39,6 +39,7 @@ class SQLiteGraphStore(GraphStore):
                 trigger TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 initial_state TEXT NOT NULL DEFAULT '{}',
+                serial_key TEXT,
                 created_at REAL NOT NULL,
                 completed_at REAL
             );
@@ -72,6 +73,15 @@ class SQLiteGraphStore(GraphStore):
             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_exec_id);
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_exec_id);
         """)
+        session_columns = {
+            r["name"] for r in self.conn.execute("PRAGMA table_info(sessions)")
+        }
+        if "serial_key" not in session_columns:
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN serial_key TEXT")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_serial_key "
+            "ON sessions(serial_key) WHERE serial_key IS NOT NULL"
+        )
         # Migrate pre-retry-policy databases in place.
         existing = {
             r["name"]
@@ -99,13 +109,20 @@ class SQLiteGraphStore(GraphStore):
 
     # ── Sessions ──────────────────────────────────────────────
 
-    def create_session(self, trigger: str, initial_state: Dict[str, Any]) -> str:
+    def create_session(
+        self, trigger: str, initial_state: Dict[str, Any], serial_key: str = None
+    ) -> Optional[str]:
         session_id = uuid.uuid4().hex
-        self.conn.execute(
-            "INSERT INTO sessions (id, trigger, status, initial_state, created_at) "
-            "VALUES (?, ?, 'running', ?, ?)",
-            (session_id, trigger, json.dumps(initial_state), time.time()),
-        )
+        try:
+            self.conn.execute(
+                "INSERT INTO sessions "
+                "(id, trigger, status, initial_state, serial_key, created_at) "
+                "VALUES (?, ?, 'running', ?, ?, ?)",
+                (session_id, trigger, json.dumps(initial_state), serial_key, time.time()),
+            )
+        except sqlite3.IntegrityError:
+            self.conn.rollback()
+            return None
         self.conn.commit()
         return session_id
 
@@ -121,14 +138,14 @@ class SQLiteGraphStore(GraphStore):
 
     def complete_session(self, session_id: str):
         self.conn.execute(
-            "UPDATE sessions SET status = 'completed', completed_at = ? WHERE id = ?",
+            "UPDATE sessions SET status = 'completed', completed_at = ?, serial_key = NULL WHERE id = ?",
             (time.time(), session_id),
         )
         self.conn.commit()
 
     def fail_session(self, session_id: str):
         self.conn.execute(
-            "UPDATE sessions SET status = 'failed', completed_at = ? WHERE id = ?",
+            "UPDATE sessions SET status = 'failed', completed_at = ?, serial_key = NULL WHERE id = ?",
             (time.time(), session_id),
         )
         self.conn.commit()

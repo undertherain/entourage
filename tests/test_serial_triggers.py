@@ -1,6 +1,11 @@
 import time
 
-from entourage.runtime import InMemoryGraphStore, InMemoryReadyQueue, QueueRuntime
+from entourage.runtime import (
+    InMemoryGraphStore,
+    InMemoryReadyQueue,
+    QueueRuntime,
+    TriggerClient,
+)
 
 
 def make_runtime(seen=None):
@@ -45,3 +50,23 @@ def test_different_serial_keys_can_start_together():
     runtime.run_once(poll_wait=0)
 
     assert len(store.get_running_sessions()) == 2
+
+
+def test_store_claims_and_releases_serial_key(store):
+    first = store.create_session("message", {"message": "one"}, serial_key="chat:1")
+    assert first is not None
+    assert store.create_session(
+        "message", {"message": "two"}, serial_key="chat:1"
+    ) is None
+
+    store.complete_session(first)
+    second = store.create_session("message", {"message": "two"}, serial_key="chat:1")
+    assert second is not None
+
+
+def test_trigger_client_includes_serial_key():
+    queue = InMemoryReadyQueue()
+    TriggerClient(queue).send_trigger("message", {"text": "hi"}, "chat:1")
+    (message,) = queue.receive(wait_seconds=0)
+    assert message.payload["trigger"] == "message"
+    assert message.payload["serial_key"] == "chat:1"

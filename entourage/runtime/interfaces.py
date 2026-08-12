@@ -35,8 +35,13 @@ class GraphStore(ABC):
     # ── Sessions ──────────────────────────────────────────────
 
     @abstractmethod
-    def create_session(self, trigger: str, initial_state: Dict[str, Any]) -> str:
-        """Create a session in 'running' state; return its id."""
+    def create_session(
+        self, trigger: str, initial_state: Dict[str, Any], serial_key: str = None
+    ) -> Optional[str]:
+        """Atomically create a running session and claim ``serial_key``.
+
+        Return ``None`` when another running session owns the key.
+        """
 
     @abstractmethod
     def get_session(self, session_id: str) -> Optional[Dict]:

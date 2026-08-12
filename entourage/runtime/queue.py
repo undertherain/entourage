@@ -33,6 +33,7 @@ from ..flow import Parallel, Sequence, RecursionLimitExceeded
 from .interfaces import GraphStore, ReadyQueue
 from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan, resolve_node
 from .store import DEFAULT_DB_PATH, SQLiteGraphStore
+from .client import TriggerClient
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +140,12 @@ class QueueRuntime:
     # ── Session creation ──────────────────────────────────────
 
     def start_session(
-        self, trigger, initial_state: Dict[str, Any] = None, plan: Plan = None
-    ) -> str:
+        self,
+        trigger,
+        initial_state: Dict[str, Any] = None,
+        plan: Plan = None,
+        serial_key: str = None,
+    ) -> Optional[str]:
         """
         Create a new session from a trigger.
 
@@ -161,7 +166,11 @@ class QueueRuntime:
                 )
             plan = self.pipelines[trigger](initial_state)
 
-        session_id = self.store.create_session(trigger, initial_state)
+        session_id = self.store.create_session(
+            trigger, initial_state, serial_key=serial_key
+        )
+        if session_id is None:
+            return None
 
         # Create HEAD and END sentinels
         head_id = self.store.add_execution(session_id, HEAD, exec_id=f"head-{session_id[:8]}")
@@ -351,22 +360,8 @@ class QueueRuntime:
         while one is running, later triggers remain queued.  This is useful
         for conversation IDs, incident IDs, and other ordered event streams.
         """
-        payload = {
-            "type": "trigger",
-            "trigger": trigger,
-            "state": state,
-            "time_created": time.time(),
-        }
-        if serial_key is not None:
-            payload["serial_key"] = serial_key
-        self.queue.send(payload)
+        TriggerClient(self.queue).send_trigger(trigger, state, serial_key=serial_key)
         logger.info("Sent trigger '%s' to queue", trigger)
-
-    def _serial_key_is_running(self, serial_key: str) -> bool:
-        return any(
-            session.get("initial_state", {}).get("_entourage_serial_key") == serial_key
-            for session in self.store.get_running_sessions()
-        )
 
     # ── Main loop ─────────────────────────────────────────────
 
@@ -384,17 +379,14 @@ class QueueRuntime:
 
         if msg_type == "trigger":
             serial_key = body.get("serial_key")
-            if serial_key and self._serial_key_is_running(serial_key):
+            session_id = self.start_session(
+                body["trigger"], body.get("state", {}), serial_key=serial_key
+            )
+            if session_id is None:
                 deferred = {**body, "not_before": time.time() + 0.1}
                 self.queue.send(deferred)
                 logger.debug("Deferred trigger for busy serial key %s", serial_key)
                 return
-            state = dict(body.get("state", {}))
-            if serial_key:
-                # Kept with the session so all store backends can recover the
-                # serialization lock after a worker restart.
-                state["_entourage_serial_key"] = serial_key
-            self.start_session(body["trigger"], state)
 
         elif msg_type == "execute":
             self._execute_node(body["exec_id"], body["session_id"])

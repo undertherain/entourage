@@ -141,6 +141,9 @@ safe point:
 python3 -m examples.mailbox_cli
 ```
 
+The demo uses a redraw-safe message composer: background checkpoint output is
+rendered above it without destroying a partially typed message.
+
 ### Continuous agents
 
 `entourage.conversation` provides a configurable loop for an agent whose

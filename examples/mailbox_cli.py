@@ -13,10 +13,19 @@ import threading
 import time
 
 from entourage.mailbox import InMemoryMailbox
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.styles import Style
 
 
 CONVERSATION = "demo"
 CONSUMER = "demo-agent"
+PROMPT_STYLE = Style.from_dict({
+    "frame": "bold ansicyan",
+    "hint": "ansibrightblack",
+})
 
 
 def render(event):
@@ -56,7 +65,15 @@ def agent_loop(mailbox, stop):
         joined = drain(mailbox, "before final answer")
         if joined:
             print("agent: incorporated the late update before answering", flush=True)
-        print("agent: done; waiting for more events\n> ", end="", flush=True)
+        print("agent: done; waiting for more events", flush=True)
+
+
+def parse_input(text):
+    if text.startswith("/subagent "):
+        return "subagent", text[len("/subagent "):]
+    if text.startswith("/ambient "):
+        return "ambient", text[len("/ambient "):]
+    return "user", text
 
 
 def main():
@@ -65,23 +82,27 @@ def main():
     worker = threading.Thread(target=agent_loop, args=(mailbox, stop), daemon=True)
     worker.start()
     print("Mailbox checkpoint demo. Type a request, /subagent ..., /ambient ..., or /quit.")
-    while True:
-        try:
-            text = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            text = "/quit"
-        if not text:
-            continue
-        if text == "/quit":
-            stop.set()
-            break
-        if text.startswith("/subagent "):
-            kind, content = "subagent", text[len("/subagent "):]
-        elif text.startswith("/ambient "):
-            kind, content = "ambient", text[len("/ambient "):]
-        else:
-            kind, content = "user", text
-        mailbox.append(CONVERSATION, {"kind": kind, "content": content, "source": "cli"})
+    session = PromptSession(history=InMemoryHistory(), style=PROMPT_STYLE)
+    with patch_stdout(raw=True):
+        while True:
+            try:
+                text = session.prompt(
+                    HTML("<frame>╭─ message\n╰─› </frame>"),
+                    bottom_toolbar=HTML(
+                        "<hint>Enter send · /subagent update · /ambient alert · /quit</hint>"
+                    ),
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                text = "/quit"
+            if not text:
+                continue
+            if text == "/quit":
+                stop.set()
+                break
+            kind, content = parse_input(text)
+            mailbox.append(
+                CONVERSATION, {"kind": kind, "content": content, "source": "cli"}
+            )
     worker.join(timeout=0.5)
 
 

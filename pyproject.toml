@@ -23,6 +23,7 @@ dependencies = [
     "tavily-python",
     "litellm",
     "PyYAML",
+    "prompt-toolkit",
 ]
 
 [project.optional-dependencies]

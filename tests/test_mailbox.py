@@ -4,6 +4,7 @@ import time
 import pytest
 
 from entourage.mailbox import InMemoryMailbox
+from examples.mailbox_cli import parse_input
 
 
 def test_append_is_idempotent_and_claims_in_order():
@@ -73,3 +74,15 @@ def test_wait_wakes_when_a_lease_expires():
 
     assert mailbox.wait_for_events("chat", timeout=0.5) is True
     assert mailbox.claim("chat", "recovery")[0]["content"] == "recover"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("hello", ("user", "hello")),
+        ("/subagent found it", ("subagent", "found it")),
+        ("/ambient elevated errors", ("ambient", "elevated errors")),
+    ],
+)
+def test_cli_input_kinds(text, expected):
+    assert parse_input(text) == expected

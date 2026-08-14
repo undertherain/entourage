@@ -1,6 +1,7 @@
 import json
 import datetime
 import uuid
+import threading
 from pathlib import Path
 from urllib.parse import quote
 
@@ -95,6 +96,43 @@ class ChatHistory:
         self.messages = []
         self._save()
         return self.chat_id
+
+
+class EventHistory:
+    """Durable, idempotent typed conversation events for one conversation."""
+
+    def __init__(self, conversation_id: str, history_dir: Path):
+        self.conversation_id = conversation_id
+        self.history_dir = Path(history_dir)
+        self.file_path = self.history_dir / f"{conversation_storage_key(conversation_id)}.events.json"
+        self._lock = threading.Lock()
+        self._events: list[dict] = []
+        if self.file_path.exists():
+            try:
+                self._events = json.loads(self.file_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                raise RuntimeError(f"could not load event history {self.file_path}: {exc}") from exc
+
+    def append(self, event: dict) -> bool:
+        """Persist an event once by event_id; return whether it was appended."""
+        event_id = event.get("event_id")
+        if not event_id:
+            raise ValueError("event_id is required")
+        with self._lock:
+            if any(item.get("event_id") == event_id for item in self._events):
+                return False
+            self._events.append(dict(event))
+            self.history_dir.mkdir(parents=True, exist_ok=True)
+            temporary = self.file_path.with_suffix(self.file_path.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(self._events, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            temporary.replace(self.file_path)
+        return True
+
+    def get_events(self) -> list[dict]:
+        with self._lock:
+            return [dict(event) for event in self._events]
 
 
 class MemoryDB:

@@ -169,6 +169,9 @@ Retention is policy-driven and independent per layer.
 2. ~~Implement an in-memory backend and deterministic interjection tests.~~
    `InMemoryMailbox` is the reference backend; `examples/mailbox_cli.py`
    demonstrates typed events joining work at safe checkpoints.
+   `examples/telegram_group_manager.py` exercises wait-any conversation
+   claiming, persistent typed event history, group triage, multi-source
+   interjections, and recorded Telegram announcement delivery in one process.
 3. Implement the Redis backend with wake-up, leases, crash recovery, and
    duplicate-event tests.
 4. Add waiting-session support to the runtime and expose mailbox checkpoints as

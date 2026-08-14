@@ -1,5 +1,5 @@
 from entourage.conversation import ContinuousConversation, ConversationPolicy
-from entourage.memory import ChatHistory, conversation_storage_key
+from entourage.memory import ChatHistory, EventHistory, conversation_storage_key
 
 
 class Topics:
@@ -28,6 +28,15 @@ def test_conversation_id_cannot_escape_history_directory(tmp_path):
     assert value.file_path.parent == tmp_path
     assert value.file_path.name == "..%2F..%2Foutside.json"
     assert conversation_storage_key("telegram-main:123") == "telegram-main:123"
+
+
+def test_event_history_is_idempotent_and_reloadable(tmp_path):
+    history = EventHistory("group:42", tmp_path)
+    event = {"event_id": "telegram:7", "kind": "user", "content": "hello"}
+
+    assert history.append(event) is True
+    assert history.append({**event, "content": "duplicate"}) is False
+    assert EventHistory("group:42", tmp_path).get_events() == [event]
 
 
 def test_topic_shift_archives_segment_and_clears_history(tmp_path):

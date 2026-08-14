@@ -78,6 +78,25 @@ def test_wait_wakes_when_a_lease_expires():
     assert mailbox.claim("chat", "recovery")[0]["content"] == "recover"
 
 
+def test_claim_any_selects_oldest_conversation_without_mixing():
+    mailbox = InMemoryMailbox()
+    mailbox.append("older", {"event_id": "one", "created_at": 1})
+    mailbox.append("newer", {"event_id": "two", "created_at": 2})
+    mailbox.append("older", {"event_id": "three", "created_at": 3})
+
+    events = mailbox.claim_any("worker")
+
+    assert [event["event_id"] for event in events] == ["one", "three"]
+    assert {event["conversation_id"] for event in events} == {"older"}
+
+
+def test_wait_for_any_conversation():
+    mailbox = InMemoryMailbox()
+    mailbox.append("chat-b", {"content": "ready"})
+
+    assert mailbox.wait_for_events(timeout=0) is True
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

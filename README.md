@@ -130,7 +130,7 @@ python3 examples/cli.py
 python3 examples/cli.py --debug
 ```
 
-More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
+More examples live in `examples/` (`telegram_group_manager.py`, `coding_agent.py`).
 
 To see Codex-like interjections, run the in-memory mailbox checkpoint demo.
 It uses LiteLLM with `gpt-5-nano` by default and inserts short artificial work
@@ -197,30 +197,37 @@ agent:
     - diagnostics.tools:QueryLogs
 ```
 
-### Minimal Telegram bot
+### Telegram group manager
 
-`examples/telegram_simple.py` is a small continuous-conversation demo. Each
-Telegram update pushes a `telegram_message` trigger onto Entourage's queue;
-the listener never calls the model directly. The workflow stores incoming and
-successfully delivered outgoing turns under `data/telegram-demo/history/`, so
-Telegram is transport rather than conversation storage.
+`examples/telegram_group_manager.py` is the canonical conversational transport
+demo. Telegram messages, local CLI input, ambient/Grafana observations,
+announcements, and subagent updates enter one typed mailbox and agent-owned
+event history. Ordinary group chatter is recorded but triaged away; useful
+questions are answered after safe-point drains, so messages arriving during
+the artificial work stages can join the same model call.
 
-The chat ID is passed as the trigger's `serial_key`. If another message arrives
-while that chat's session is still running, it remains queued and starts only
-after the current session finishes; different chats can progress independently.
+Telegram is only a producer and delivery adapter. `/announce TEXT` demonstrates
+the own-message problem explicitly: the ambient event is recorded first, then
+sent to Telegram with a delivery receipt, so the agent knows about a message
+which Telegram's `getUpdates` will never echo back to the bot.
 
 ```bash
-export TELEGRAM_BOT_TOKEN=...                # token from BotFather
-export TELEGRAM_ALLOWED_CHAT_IDS=123456789   # comma-separated; unset denies all
+export TELEGRAM_BOT_TOKEN=...
+export TELEGRAM_ALLOWED_CHAT_IDS=-123456789  # comma-separated; unset denies all
+export TELEGRAM_GROUP_CHAT_ID=-123456789     # optional for a single allowed chat
+export TELEGRAM_BOT_NAME=Alexander
 export OPENAI_API_KEY=...
-python3 -m examples.telegram_simple
+python3 -m examples.telegram_group_manager
 ```
 
-Send `/new` to archive the current live history and start with empty context.
-The demo uses an in-memory trigger queue for a one-process quick start and a
-persistent SQLite execution graph. Swap in the Redis queue/store pair when the
-listener and workers need to be separate processes or queued triggers must
-survive a process restart.
+The CLI commands are `/ambient`, `/announce`, `/subagent`, and `/quit`. Disable
+Telegram group privacy through BotFather when the bot must observe ordinary
+group chatter rather than only commands and direct mentions.
+
+The event history is persistent under `data/telegram-group-manager/`; the
+mailbox itself is currently in memory. A process crash can therefore lose
+events which have arrived but not yet reached history. Redis mailbox persistence
+and graph-integrated waiting sessions remain the next runtime layer.
 
 ---
 

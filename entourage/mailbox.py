@@ -31,6 +31,12 @@ class Mailbox(ABC):
         """Lease pending events in append order."""
 
     @abstractmethod
+    def claim_any(
+        self, consumer: str, limit: int = 20, lease_seconds: float = 30
+    ) -> List[Dict[str, Any]]:
+        """Lease the oldest ready conversation's events, without mixing conversations."""
+
+    @abstractmethod
     def acknowledge(
         self, conversation_id: str, consumer: str, event_ids: List[str]
     ) -> None:
@@ -49,6 +55,7 @@ class InMemoryMailbox(Mailbox):
     def __init__(self):
         self._events: Dict[str, List[Dict[str, Any]]] = {}
         self._event_ids: Dict[str, str] = {}
+        self._next_sequence = 0
         self._condition = threading.Condition()
 
     def append(self, conversation_id: str, event: Dict[str, Any]) -> str:
@@ -71,8 +78,10 @@ class InMemoryMailbox(Mailbox):
                     "consumer": None,
                     "lease_until": None,
                     "acknowledged_at": None,
+                    "_sequence": self._next_sequence,
                 }
             )
+            self._next_sequence += 1
             self._events.setdefault(conversation_id, []).append(value)
             self._event_ids[event_id] = conversation_id
             self._condition.notify_all()
@@ -110,6 +119,30 @@ class InMemoryMailbox(Mailbox):
                     break
         return claimed
 
+    def claim_any(
+        self, consumer: str, limit: int = 20, lease_seconds: float = 30
+    ) -> List[Dict[str, Any]]:
+        with self._condition:
+            now = time.time()
+            oldest = None
+            for conversation_id, events in self._events.items():
+                for event in events:
+                    claimable = event["status"] == "pending" or (
+                        event["status"] == "leased"
+                        and event["lease_until"] is not None
+                        and event["lease_until"] <= now
+                    )
+                    if claimable and (
+                        oldest is None or event["_sequence"] < oldest[0]
+                    ):
+                        oldest = (event["_sequence"], conversation_id)
+                    if claimable:
+                        break
+            if oldest is None:
+                return []
+            conversation_id = oldest[1]
+        return self.claim(conversation_id, consumer, limit, lease_seconds)
+
     def acknowledge(
         self, conversation_id: str, consumer: str, event_ids: List[str]
     ) -> None:
@@ -132,7 +165,9 @@ class InMemoryMailbox(Mailbox):
                 event["lease_until"] = None
             self._condition.notify_all()
 
-    def wait_for_events(self, conversation_id: str, timeout: Optional[float] = None) -> bool:
+    def wait_for_events(
+        self, conversation_id: Optional[str] = None, timeout: Optional[float] = None
+    ) -> bool:
         """Block the local demo until claimable work exists; not worker polling."""
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._condition:
@@ -152,7 +187,7 @@ class InMemoryMailbox(Mailbox):
                 for event in self._events.get(conversation_id, [])
             )
 
-    def _has_claimable(self, conversation_id: str) -> bool:
+    def _has_claimable(self, conversation_id: Optional[str]) -> bool:
         now = time.time()
         return any(
             event["status"] == "pending"
@@ -161,14 +196,22 @@ class InMemoryMailbox(Mailbox):
                 and event["lease_until"] is not None
                 and event["lease_until"] <= now
             )
-            for event in self._events.get(conversation_id, [])
+            for event in (
+                self._events.get(conversation_id, [])
+                if conversation_id is not None
+                else [item for events in self._events.values() for item in events]
+            )
         )
 
-    def _next_lease_delay(self, conversation_id: str) -> Optional[float]:
+    def _next_lease_delay(self, conversation_id: Optional[str]) -> Optional[float]:
         now = time.time()
         expiries = [
             event["lease_until"]
-            for event in self._events.get(conversation_id, [])
+            for event in (
+                self._events.get(conversation_id, [])
+                if conversation_id is not None
+                else [item for events in self._events.values() for item in events]
+            )
             if event["status"] == "leased" and event["lease_until"] is not None
         ]
         return max(0, min(expiries) - now) if expiries else None
@@ -197,4 +240,5 @@ class InMemoryMailbox(Mailbox):
         result.pop("consumer", None)
         result.pop("lease_until", None)
         result.pop("acknowledged_at", None)
+        result.pop("_sequence", None)
         return result

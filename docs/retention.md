@@ -42,6 +42,11 @@ The group-manager demo prunes acknowledged payloads immediately and retains
 deduplication keys for seven days. Unacknowledged and leased payloads are never
 eligible for payload collection.
 
+Both `InMemoryMailbox` and `RedisMailbox` implement the same bounded retention
+contract. `RuntimeBackendConfig` selects mailbox, graph store, and ready queue
+as one backend family; component injection remains available for specialized
+hybrid deployments.
+
 ## Conversation events
 
 `EventHistory` retains a hot JSON window of 1,000 typed events by default.

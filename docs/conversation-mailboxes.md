@@ -1,8 +1,8 @@
 # Durable conversation mailboxes and bounded history
 
-Status: design direction with an in-memory mailbox reference implementation;
-durable backends and runtime waiting sessions are not implemented. Recorded
-2026-08-14 from the Concierge and KIP diagnostics-agent use cases.
+Status: in-memory and Redis mailbox strategies implemented; graph-integrated
+runtime waiting sessions are not implemented. Recorded 2026-08-14 from the
+Concierge and KIP diagnostics-agent use cases.
 
 ## Decision
 
@@ -182,8 +182,9 @@ the future waiting-session checkpoint design.
    `examples/telegram_group_manager.py` exercises wait-any conversation
    claiming, persistent typed event history, group triage, multi-source
    interjections, and recorded Telegram announcement delivery in one process.
-3. Implement the Redis backend with wake-up, leases, crash recovery, and
-   duplicate-event tests.
+3. ~~Implement the Redis backend with wake-up, leases, crash recovery, and
+   duplicate-event tests.~~ `RedisMailbox` implements the same contract and is
+   selected together with Redis graph/queue strategies by `RuntimeBackendConfig`.
 4. Add waiting-session support to the runtime and expose mailbox checkpoints as
    plans/nodes.
 5. Migrate Concierge from turn-level sessions as the first consumer.

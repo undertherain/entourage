@@ -13,6 +13,9 @@ Environment:
     GROUP_MANAGER_TRIAGE_MODEL      defaults to GROUP_MANAGER_MODEL
     GROUP_MANAGER_STEP_DELAY        artificial checkpoint delay, default 2
     GROUP_MANAGER_DATA_DIR          default data/telegram-group-manager
+    GROUP_MANAGER_RUNTIME_BACKEND   memory (default) or redis
+    GROUP_MANAGER_REDIS_URL         used by redis backend
+    GROUP_MANAGER_RUNTIME_PREFIX    default entourage:group-manager
 
 Commands in the optional CLI composer:
     TEXT                 user message entering the same group conversation
@@ -36,8 +39,8 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 
+from entourage.config import RuntimeBackendConfig
 from entourage.integrations.telegram import TelegramListener, TelegramSender
-from entourage.mailbox import InMemoryMailbox
 from entourage.memory import EventHistory
 
 
@@ -289,7 +292,14 @@ def main():
     if not cli_chat:
         raise SystemExit("set TELEGRAM_GROUP_CHAT_ID when more than one chat is allowed")
 
-    mailbox = InMemoryMailbox()
+    resources = RuntimeBackendConfig(
+        backend=os.environ.get("GROUP_MANAGER_RUNTIME_BACKEND", "memory"),
+        url=os.environ.get("GROUP_MANAGER_REDIS_URL", "redis://localhost:6379/0"),
+        prefix=os.environ.get(
+            "GROUP_MANAGER_RUNTIME_PREFIX", "entourage:group-manager"
+        ),
+    ).resources()
+    mailbox = resources.mailbox
     telegram = TelegramSender()
     manager = GroupManager(
         mailbox,

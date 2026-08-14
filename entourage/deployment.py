@@ -135,7 +135,10 @@ def create_worker(
     runtime_factory: Callable[..., QueueRuntime] = QueueRuntime,
 ) -> AgentWorker:
     manifest = load_agent_manifest(manifest_path)
+    resources = manifest.runtime.resources()
     runtime = runtime_factory(
-        store=manifest.runtime.graph_store(), queue=manifest.runtime.ready_queue()
+        store=resources.graph_store,
+        queue=resources.ready_queue,
+        mailbox=resources.mailbox,
     )
     return AgentWorker(manifest, runtime, publisher=publisher)

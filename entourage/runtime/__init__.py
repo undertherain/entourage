@@ -17,6 +17,7 @@ from .queue import NodeTimeoutError, QueueRuntime
 from .local import Runtime
 from .client import TriggerClient
 from .gc import RetentionPolicy, collect_terminal_sessions
+from ..redis_mailbox import RedisMailbox
 
 __all__ = [
     "GraphStore",
@@ -38,4 +39,5 @@ __all__ = [
     "TriggerClient",
     "RetentionPolicy",
     "collect_terminal_sessions",
+    "RedisMailbox",
 ]

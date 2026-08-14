@@ -169,7 +169,9 @@ safe-point ingestion semantics, and independent conversation/context/graph
 retention policies are recorded in
 [`docs/conversation-mailboxes.md`](docs/conversation-mailboxes.md).
 
-For multi-agent deployments, `RedisRuntimeConfig` derives graph and ready-queue
+For multi-agent deployments, `RuntimeBackendConfig` selects one coherent family
+of graph-store, ready-queue, and mailbox strategies. `backend: memory` gives a
+zero-infrastructure test runtime; `backend: redis` derives three isolated
 namespaces from an application-selected prefix. Agents can share one Redis
 deployment while keeping scheduler namespaces isolated when their workers
 register different node sets.
@@ -186,8 +188,10 @@ to Telegram, a console, or another transport.
 agent:
   id: diagnostics
   trigger: diagnostics.message
-  redis_prefix: agents:diagnostics
-  redis_url: ${AGENT_REDIS_URL}
+  runtime:
+    backend: redis
+    prefix: agents:diagnostics
+    url: ${AGENT_REDIS_URL}
   state_dir: state
   model: ${AGENT_MODEL}
   utility_model: ${AGENT_UTILITY_MODEL}
@@ -220,14 +224,24 @@ export OPENAI_API_KEY=...
 python3 -m examples.telegram_group_manager
 ```
 
+The demo defaults to the coherent in-memory backend family. For a durable NAS
+run, select Redis without changing application code:
+
+```bash
+export GROUP_MANAGER_RUNTIME_BACKEND=redis
+export GROUP_MANAGER_REDIS_URL=redis://localhost:6379/0
+export GROUP_MANAGER_RUNTIME_PREFIX=entourage:group-manager
+python3 -m examples.telegram_group_manager
+```
+
 The CLI commands are `/ambient`, `/announce`, `/subagent`, and `/quit`. Disable
 Telegram group privacy through BotFather when the bot must observe ordinary
 group chatter rather than only commands and direct mentions.
 
-The event history is persistent under `data/telegram-group-manager/`; the
-mailbox itself is currently in memory. A process crash can therefore lose
-events which have arrived but not yet reached history. Redis mailbox persistence
-and graph-integrated waiting sessions remain the next runtime layer.
+The event history is persistent under `data/telegram-group-manager/`. With the
+memory backend, pending work remains process-local; with Redis, mailbox events,
+leases, deduplication keys, the ready queue, and execution graphs share one
+durable backend family. Graph-integrated waiting sessions remain the next layer.
 
 ---
 
@@ -235,10 +249,11 @@ and graph-integrated waiting sessions remain the next runtime layer.
 
 - **`entourage/flow.py`** — the combinators: `Sequence`, `Parallel`, `Conditional`, and the
   policy-carrying `Node` leaf (retry/timeout controls).
-- **`entourage/runtime/`** — the scheduler. One engine (`QueueRuntime`) behind two backend
-  seams: `GraphStore` (the persistent execution graph — in-memory, SQLite, and Redis) and
+- **`entourage/runtime/`** — the scheduler. One engine (`QueueRuntime`) uses three backend
+  strategies: `GraphStore` (the persistent execution graph — in-memory, SQLite, and Redis),
   `ReadyQueue` (pointers to ready work — in-memory, Redis with fair-share claiming per
-  session, and AWS SQS). The Redis pair puts the whole runtime state on one server:
+  session, and AWS SQS), and `Mailbox` (typed conversation events — in-memory and Redis).
+  The Redis family puts the whole runtime state on one server:
   a durable, multi-worker deployment with ~3 ms/node orchestration overhead.
   The in-memory pair powers the local `Runtime` used by the examples; any durable
   store+queue combination gives fault-tolerant, resumable runs. The graph algebra (ready

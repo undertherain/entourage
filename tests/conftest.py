@@ -90,3 +90,23 @@ def redis_queue(redis_client):
     )
     yield q
     q.purge()
+
+
+@pytest.fixture(params=["memory", "redis"])
+def mailbox_backend(request):
+    """Mailbox contract backend with an isolated Redis namespace when available."""
+    if request.param == "memory":
+        from entourage.mailbox import InMemoryMailbox
+
+        yield InMemoryMailbox()
+        return
+    from entourage.redis_mailbox import RedisMailbox
+
+    client = request.getfixturevalue("redis_client")
+    mailbox = RedisMailbox(
+        client=client,
+        namespace=f"entourage-test-mailbox-{uuid.uuid4().hex[:8]}",
+        poll_interval=0.005,
+    )
+    yield mailbox
+    mailbox.purge()

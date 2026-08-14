@@ -90,6 +90,7 @@ class QueueRuntime:
         region: str = "us-east-1",
         db_path: Path = DEFAULT_DB_PATH,
         retention_policy: RetentionPolicy = RetentionPolicy(),
+        mailbox=None,
     ):
         self.node_registry = node_registry or {}
         self.node_policies: Dict[str, Dict[str, Any]] = {}
@@ -101,7 +102,19 @@ class QueueRuntime:
             queue = SQSReadyQueue(queue_name=queue_name, region=region)
         self.queue = queue
         self.retention_policy = retention_policy
+        self.mailbox = mailbox
         self._last_gc_at = 0.0
+
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        """Construct graph, queue, and mailbox from one backend profile."""
+        resources = config.resources()
+        return cls(
+            store=resources.graph_store,
+            queue=resources.ready_queue,
+            mailbox=resources.mailbox,
+            **kwargs,
+        )
 
     # ── Registration ──────────────────────────────────────────
 

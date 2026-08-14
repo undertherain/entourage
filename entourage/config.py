@@ -52,6 +52,64 @@ class RedisRuntimeConfig:
 
         return RedisReadyQueue(url=self.url, namespace=self.queue_namespace)
 
+    @property
+    def mailbox_namespace(self) -> str:
+        return f"{self.prefix}:mailbox"
+
+    def mailbox(self):
+        from .redis_mailbox import RedisMailbox
+
+        return RedisMailbox(url=self.url, namespace=self.mailbox_namespace)
+
+    def resources(self) -> "RuntimeResources":
+        return RuntimeResources(
+            graph_store=self.graph_store(),
+            ready_queue=self.ready_queue(),
+            mailbox=self.mailbox(),
+        )
+
+
+@dataclass(frozen=True)
+class RuntimeResources:
+    """A coherent family of runtime backend strategies."""
+
+    graph_store: Any
+    ready_queue: Any
+    mailbox: Any
+
+
+@dataclass(frozen=True)
+class RuntimeBackendConfig:
+    """Select all runtime storage strategies with one backend setting."""
+
+    backend: str = "memory"
+    url: str = "redis://localhost:6379/0"
+    prefix: str = "entourage"
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "RuntimeBackendConfig":
+        return cls(
+            backend=str(value.get("backend", "memory")),
+            url=str(resolve_value(value.get("url", cls.url))),
+            prefix=str(value.get("prefix", cls.prefix)),
+        )
+
+    def resources(self) -> RuntimeResources:
+        if self.backend == "memory":
+            from .mailbox import InMemoryMailbox
+            from .runtime import InMemoryGraphStore, InMemoryReadyQueue
+
+            return RuntimeResources(
+                graph_store=InMemoryGraphStore(),
+                ready_queue=InMemoryReadyQueue(),
+                mailbox=InMemoryMailbox(),
+            )
+        if self.backend == "redis":
+            return RedisRuntimeConfig(url=self.url, prefix=self.prefix).resources()
+        raise ValueError(
+            f"unknown runtime backend {self.backend!r}; expected 'memory' or 'redis'"
+        )
+
 
 @dataclass(frozen=True)
 class ConversationConfig:
@@ -66,7 +124,7 @@ class AgentManifest:
 
     id: str
     trigger: str
-    runtime: RedisRuntimeConfig
+    runtime: RuntimeBackendConfig
     state_dir: Path
     model: str
     utility_model: str
@@ -112,10 +170,30 @@ def load_agent_manifest(path: Path, environ: Mapping[str, str] = os.environ) -> 
         raise ValueError("agent.tools must be a list of import strings")
 
     agent_id = str(raw["id"])
-    runtime = RedisRuntimeConfig(
-        url=str(resolve_value(raw.get("redis_url", "redis://localhost:6379/0"), environ)),
-        prefix=str(raw.get("redis_prefix", f"entourage:{agent_id}")),
-    )
+    runtime_raw = raw.get("runtime")
+    if runtime_raw is not None and not isinstance(runtime_raw, Mapping):
+        raise ValueError("agent.runtime must be a mapping")
+    if runtime_raw is not None:
+        runtime = RuntimeBackendConfig(
+            backend=str(runtime_raw.get("backend", "memory")),
+            url=str(
+                resolve_value(
+                    runtime_raw.get("url", "redis://localhost:6379/0"), environ
+                )
+            ),
+            prefix=str(runtime_raw.get("prefix", f"entourage:{agent_id}")),
+        )
+    else:
+        # Compatibility with the first manifest draft, which was Redis-only.
+        runtime = RuntimeBackendConfig(
+            backend="redis",
+            url=str(
+                resolve_value(
+                    raw.get("redis_url", "redis://localhost:6379/0"), environ
+                )
+            ),
+            prefix=str(raw.get("redis_prefix", f"entourage:{agent_id}")),
+        )
     return AgentManifest(
         id=agent_id,
         trigger=str(raw.get("trigger", f"{agent_id}.message")),

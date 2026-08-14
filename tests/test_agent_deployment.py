@@ -2,8 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from entourage.config import load_agent_manifest
+from entourage.config import RuntimeBackendConfig, load_agent_manifest
 from entourage.deployment import AgentWorker, import_object
+from entourage.mailbox import InMemoryMailbox
+from entourage.runtime import InMemoryGraphStore, InMemoryReadyQueue, QueueRuntime
 
 
 class FakeRuntime:
@@ -66,6 +68,46 @@ def test_manifest_is_portable_and_resolves_whole_environment_values(tmp_path):
     assert manifest.model == "test/model"
     assert manifest.conversation.topic_shift_detection is False
     assert manifest.conversation.reset_command == "/clear"
+
+
+def test_manifest_selects_one_runtime_backend_family(tmp_path):
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        """\
+agent:
+  id: local
+  model: test/model
+  prompt: prompt.md
+  runtime:
+    backend: memory
+""",
+        encoding="utf-8",
+    )
+
+    manifest = load_agent_manifest(path)
+    resources = manifest.runtime.resources()
+
+    assert isinstance(resources.graph_store, InMemoryGraphStore)
+    assert isinstance(resources.ready_queue, InMemoryReadyQueue)
+    assert isinstance(resources.mailbox, InMemoryMailbox)
+
+
+def test_queue_runtime_constructs_all_resources_from_one_config():
+    runtime = QueueRuntime.from_config(RuntimeBackendConfig(backend="memory"))
+
+    assert isinstance(runtime.store, InMemoryGraphStore)
+    assert isinstance(runtime.queue, InMemoryReadyQueue)
+    assert isinstance(runtime.mailbox, InMemoryMailbox)
+
+
+def test_redis_profile_derives_all_namespaces_from_one_prefix():
+    resources = RuntimeBackendConfig(
+        backend="redis", url="redis://example/2", prefix="agents:kip"
+    ).resources()
+
+    assert resources.graph_store.namespace == "agents:kip:graph"
+    assert resources.ready_queue.namespace == "agents:kip:queue"
+    assert resources.mailbox.namespace == "agents:kip:mailbox"
 
 
 def test_worker_keeps_conversations_separate_and_publishes(tmp_path):

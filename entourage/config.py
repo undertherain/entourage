@@ -1,7 +1,22 @@
 """Deployment configuration shared by Entourage applications and adapters."""
 
+import os
+import re
 from dataclasses import dataclass
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, Mapping, Optional, Tuple
+
+
+_ENV_VALUE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def resolve_value(value: Any, environ: Mapping[str, str] = os.environ) -> Any:
+    """Resolve a whole-value ``${NAME}`` reference without interpolating secrets."""
+    if isinstance(value, str):
+        match = _ENV_VALUE.match(value)
+        if match:
+            return environ.get(match.group(1), "")
+    return value
 
 
 @dataclass(frozen=True)
@@ -36,3 +51,85 @@ class RedisRuntimeConfig:
         from .runtime import RedisReadyQueue
 
         return RedisReadyQueue(url=self.url, namespace=self.queue_namespace)
+
+
+@dataclass(frozen=True)
+class ConversationConfig:
+    topic_shift_detection: bool = True
+    reset_command: str = "/new"
+    recent_summary_limit: int = 3
+
+
+@dataclass(frozen=True)
+class AgentManifest:
+    """Portable, application-owned declaration for one conversational agent."""
+
+    id: str
+    trigger: str
+    runtime: RedisRuntimeConfig
+    state_dir: Path
+    model: str
+    utility_model: str
+    prompt: Path
+    tools: Tuple[str, ...]
+    manifest_path: Path
+    setup: Optional[str] = None
+    conversation: ConversationConfig = ConversationConfig()
+
+    @property
+    def chat_dir(self) -> Path:
+        return self.state_dir / "chats"
+
+    @property
+    def topic_archive_dir(self) -> Path:
+        return self.state_dir / "topics"
+
+
+def _relative_to_manifest(path: Any, manifest_path: Path) -> Path:
+    result = Path(str(path))
+    return result if result.is_absolute() else manifest_path.parent / result
+
+
+def load_agent_manifest(path: Path, environ: Mapping[str, str] = os.environ) -> AgentManifest:
+    """Load an agent manifest; relative files belong to the manifest directory."""
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - packaging guards this
+        raise RuntimeError("PyYAML is required to load agent manifests") from exc
+
+    manifest_path = Path(path).resolve()
+    with manifest_path.open(encoding="utf-8") as stream:
+        document = yaml.safe_load(stream) or {}
+    raw = document.get("agent")
+    if not isinstance(raw, Mapping):
+        raise ValueError("manifest must contain an 'agent' mapping")
+
+    conversation = raw.get("conversation") or {}
+    if not isinstance(conversation, Mapping):
+        raise ValueError("agent.conversation must be a mapping")
+    tools = raw.get("tools") or []
+    if not isinstance(tools, list) or not all(isinstance(item, str) for item in tools):
+        raise ValueError("agent.tools must be a list of import strings")
+
+    agent_id = str(raw["id"])
+    runtime = RedisRuntimeConfig(
+        url=str(resolve_value(raw.get("redis_url", "redis://localhost:6379/0"), environ)),
+        prefix=str(raw.get("redis_prefix", f"entourage:{agent_id}")),
+    )
+    return AgentManifest(
+        id=agent_id,
+        trigger=str(raw.get("trigger", f"{agent_id}.message")),
+        runtime=runtime,
+        state_dir=_relative_to_manifest(raw.get("state_dir", "state"), manifest_path),
+        model=str(resolve_value(raw["model"], environ)),
+        utility_model=str(resolve_value(raw.get("utility_model", raw["model"]), environ)),
+        prompt=_relative_to_manifest(raw.get("prompt", "prompt.md"), manifest_path),
+        tools=tuple(tools),
+        setup=str(raw["setup"]) if raw.get("setup") else None,
+        manifest_path=manifest_path,
+        conversation=ConversationConfig(
+            topic_shift_detection=bool(conversation.get("topic_shift_detection", True)),
+            reset_command=str(conversation.get("reset_command", "/new")),
+            recent_summary_limit=int(conversation.get("recent_summary_limit", 3)),
+        ),
+    )

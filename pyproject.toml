@@ -22,6 +22,7 @@ dependencies = [
     "python-dotenv",
     "tavily-python",
     "litellm",
+    "PyYAML",
 ]
 
 [project.optional-dependencies]

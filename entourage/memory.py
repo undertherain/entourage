@@ -2,6 +2,7 @@ import json
 import datetime
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from litellm import completion
 
@@ -32,13 +33,18 @@ def _dialogue_only(messages: list[dict]) -> list[dict]:
         if message.get("role") in ("user", "assistant") and message.get("content")
     ]
 
+
+def conversation_storage_key(conversation_id: str) -> str:
+    """Encode an external conversation id as one safe, readable path segment."""
+    return quote(str(conversation_id), safe="-_.:")
+
 class ChatHistory:
     """Manages loading, saving, and accessing conversation messages for a single chat session."""
 
     def __init__(self, chat_id: str, history_dir: Path):
         self.chat_id = chat_id
         self.history_dir = history_dir
-        self.file_path = self.history_dir / f"{self.chat_id}.json"
+        self.file_path = self.history_dir / f"{conversation_storage_key(self.chat_id)}.json"
         self.messages: list[dict] = []
         self._load()
 

@@ -155,6 +155,29 @@ namespaces from an application-selected prefix. Agents can share one Redis
 deployment while keeping scheduler namespaces isolated when their workers
 register different node sets.
 
+`entourage.deployment` removes the repeated worker ceremony from those
+deployments. An application-owned YAML manifest selects the agent id, trigger,
+models, prompt file, state directory, setup hook, and tool factories. Relative
+paths resolve beside the manifest, so the same format can live in another
+repository. `AgentWorker` turns it into a durable trigger pipeline and keeps
+one continuous agent per `conversation_id`; a publisher callback owns delivery
+to Telegram, a console, or another transport.
+
+```yaml
+agent:
+  id: diagnostics
+  trigger: diagnostics.message
+  redis_prefix: agents:diagnostics
+  redis_url: ${AGENT_REDIS_URL}
+  state_dir: state
+  model: ${AGENT_MODEL}
+  utility_model: ${AGENT_UTILITY_MODEL}
+  prompt: prompt.md
+  setup: diagnostics.tools:setup
+  tools:
+    - diagnostics.tools:QueryLogs
+```
+
 ### Minimal Telegram bot
 
 `examples/telegram_simple.py` is a small continuous-conversation demo. Each

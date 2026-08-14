@@ -1,5 +1,5 @@
 from entourage.conversation import ContinuousConversation, ConversationPolicy
-from entourage.memory import ChatHistory
+from entourage.memory import ChatHistory, conversation_storage_key
 
 
 class Topics:
@@ -19,6 +19,15 @@ def history(tmp_path, messages):
     value = ChatHistory("conversation", tmp_path)
     value.set_messages(messages)
     return value
+
+
+def test_conversation_id_cannot_escape_history_directory(tmp_path):
+    value = ChatHistory("../../outside", tmp_path)
+    value.set_messages([{"role": "user", "content": "safe"}])
+
+    assert value.file_path.parent == tmp_path
+    assert value.file_path.name == "..%2F..%2Foutside.json"
+    assert conversation_storage_key("telegram-main:123") == "telegram-main:123"
 
 
 def test_topic_shift_archives_segment_and_clears_history(tmp_path):

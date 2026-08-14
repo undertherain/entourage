@@ -136,7 +136,7 @@ class GroupManager:
     def _history(self, conversation_id):
         if conversation_id not in self._histories:
             self._histories[conversation_id] = EventHistory(
-                conversation_id, self.history_dir
+                conversation_id, self.history_dir, max_events=1000
             )
         return self._histories[conversation_id]
 
@@ -146,6 +146,10 @@ class GroupManager:
             history.append(event)
         self.mailbox.acknowledge(
             conversation_id, self.consumer, [event["event_id"] for event in events]
+        )
+        self.mailbox.purge_acknowledged(conversation_id, limit=1000)
+        self.mailbox.purge_deduplication_keys(
+            older_than=time.time() - 7 * 24 * 60 * 60, limit=1000
         )
 
     def _checkpoint(self, conversation_id, name):

@@ -66,6 +66,37 @@ class InMemoryGraphStore(GraphStore):
             if s["status"] == "running"
         ]
 
+    def get_terminal_sessions(self) -> List[Dict]:
+        return sorted(
+            (
+                copy.deepcopy(session)
+                for session in self._sessions.values()
+                if session["status"] in {"completed", "failed"}
+            ),
+            key=lambda session: session.get("completed_at") or float("inf"),
+        )
+
+    def delete_terminal_session(self, session_id: str) -> bool:
+        session = self._sessions.get(session_id)
+        if not session:
+            return False
+        if session["status"] not in {"completed", "failed"}:
+            raise ValueError(f"session {session_id} is not terminal")
+        execution_ids = {
+            exec_id
+            for exec_id, execution in self._executions.items()
+            if execution["session_id"] == session_id
+        }
+        for exec_id in execution_ids:
+            del self._executions[exec_id]
+        self._edges = {
+            edge_key: edge
+            for edge_key, edge in self._edges.items()
+            if edge["session_id"] != session_id
+        }
+        del self._sessions[session_id]
+        return True
+
     # ── Executions ────────────────────────────────────────────
 
     def add_execution(

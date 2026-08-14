@@ -30,6 +30,24 @@ def test_acknowledged_events_are_not_redelivered():
     assert mailbox.claim("chat", "worker") == []
 
 
+def test_acknowledged_events_can_be_pruned_in_bounded_batches():
+    mailbox = InMemoryMailbox()
+    ids = [mailbox.append("chat", {"event_id": str(index)}) for index in range(3)]
+    mailbox.claim("chat", "worker")
+    mailbox.acknowledge("chat", "worker", ids)
+
+    assert mailbox.purge_acknowledged("chat", limit=2) == 2
+    assert mailbox.purge_acknowledged("chat", limit=2) == 1
+    assert mailbox.purge_acknowledged("chat", limit=2) == 0
+
+    # Payload GC retains a lightweight idempotency tombstone.
+    assert mailbox.append("chat", {"event_id": "0"}) == "0"
+    assert mailbox.claim("chat", "worker") == []
+    assert mailbox.purge_deduplication_keys(time.time() + 1, limit=2) == 2
+    assert mailbox.append("chat", {"event_id": "0"}) == "0"
+    assert mailbox.claim("chat", "worker")[0]["event_id"] == "0"
+
+
 def test_release_and_expired_lease_redeliver():
     mailbox = InMemoryMailbox()
     first = mailbox.append("chat", {"event_id": "first"})

@@ -48,13 +48,26 @@ class Mailbox(ABC):
     ) -> None:
         """Return leased events to pending without acknowledging them."""
 
+    @abstractmethod
+    def purge_acknowledged(
+        self,
+        conversation_id: Optional[str] = None,
+        older_than: Optional[float] = None,
+        limit: int = 100,
+    ) -> int:
+        """Remove acknowledged events in bounded append order."""
+
+    @abstractmethod
+    def purge_deduplication_keys(self, older_than: float, limit: int = 100) -> int:
+        """Remove old idempotency tombstones whose event payload is already gone."""
+
 
 class InMemoryMailbox(Mailbox):
     """Thread-safe reference backend with lease and idempotence semantics."""
 
     def __init__(self):
         self._events: Dict[str, List[Dict[str, Any]]] = {}
-        self._event_ids: Dict[str, str] = {}
+        self._event_ids: Dict[str, tuple[str, float]] = {}
         self._next_sequence = 0
         self._condition = threading.Condition()
 
@@ -66,7 +79,7 @@ class InMemoryMailbox(Mailbox):
         with self._condition:
             known_conversation = self._event_ids.get(event_id)
             if known_conversation is not None:
-                if known_conversation != conversation_id:
+                if known_conversation[0] != conversation_id:
                     raise ValueError(f"event_id {event_id!r} belongs to another conversation")
                 return event_id
             value.update(
@@ -83,7 +96,7 @@ class InMemoryMailbox(Mailbox):
             )
             self._next_sequence += 1
             self._events.setdefault(conversation_id, []).append(value)
-            self._event_ids[event_id] = conversation_id
+            self._event_ids[event_id] = (conversation_id, time.time())
             self._condition.notify_all()
         return event_id
 
@@ -164,6 +177,66 @@ class InMemoryMailbox(Mailbox):
                 event["consumer"] = None
                 event["lease_until"] = None
             self._condition.notify_all()
+
+    def purge_acknowledged(
+        self,
+        conversation_id: Optional[str] = None,
+        older_than: Optional[float] = None,
+        limit: int = 100,
+    ) -> int:
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        removed = 0
+        with self._condition:
+            conversation_ids = (
+                [conversation_id]
+                if conversation_id is not None
+                else list(self._events)
+            )
+            candidates = sorted(
+                (
+                    event
+                    for current in conversation_ids
+                    for event in self._events.get(current, [])
+                    if event["status"] == "acknowledged"
+                    and (
+                        older_than is None
+                        or (event["acknowledged_at"] or float("inf")) <= older_than
+                    )
+                ),
+                key=lambda event: event["_sequence"],
+            )[:limit]
+            remove_ids = {event["event_id"] for event in candidates}
+            for current in conversation_ids:
+                kept = []
+                for event in self._events.get(current, []):
+                    if event["event_id"] in remove_ids:
+                        removed += 1
+                    else:
+                        kept.append(event)
+                if kept:
+                    self._events[current] = kept
+                else:
+                    self._events.pop(current, None)
+        return removed
+
+    def purge_deduplication_keys(self, older_than: float, limit: int = 100) -> int:
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        with self._condition:
+            live_ids = {
+                event["event_id"]
+                for events in self._events.values()
+                for event in events
+            }
+            candidates = [
+                event_id
+                for event_id, (_conversation_id, seen_at) in self._event_ids.items()
+                if event_id not in live_ids and seen_at <= older_than
+            ][:limit]
+            for event_id in candidates:
+                del self._event_ids[event_id]
+        return len(candidates)
 
     def wait_for_events(
         self, conversation_id: Optional[str] = None, timeout: Optional[float] = None

@@ -144,6 +144,11 @@ Retention is policy-driven and independent per layer.
 - Retain durable facts and decisions independently from raw chat turns.
 - Apply explicit time/count policy to acknowledged raw events.
 
+Implemented for the current demo: acknowledged in-memory mailbox payloads are
+pruned after durable history handoff, seven-day idempotency tombstones prevent
+immediate redelivery duplicates, and `EventHistory` rotates beyond its bounded
+hot window into append-only JSONL.
+
 ### Model context
 
 - Rebuild rather than append forever.
@@ -160,6 +165,11 @@ Retention is policy-driven and independent per layer.
 - Remove graph records only after referenced results and mailbox checkpoints are
   durably owned elsewhere.
 - GC must be incremental, namespace-scoped, observable, and safe to retry.
+
+Implemented for terminal sessions: `RetentionPolicy` applies TTL, maximum-count,
+batch, and interval bounds across in-memory, SQLite, and Redis graph stores. See
+[`retention.md`](retention.md). Active-prefix compaction remains dependent on
+the future waiting-session checkpoint design.
 
 ## Delivery sequence
 
@@ -179,8 +189,9 @@ Retention is policy-driven and independent per layer.
 5. Migrate Concierge from turn-level sessions as the first consumer.
 6. Exercise the same contract with the KIP diagnostics bot, including ambient
    Grafana summaries and colleague conversations.
-7. Add terminal execution retention metadata and incremental graph GC only
-   after mailbox ownership boundaries are proven.
+7. ~~Add terminal execution retention metadata and incremental graph GC.~~
+   Terminal graphs are now collected incrementally; active-session prefix
+   compaction remains a later checkpoint feature.
 
 ## Acceptance scenarios
 

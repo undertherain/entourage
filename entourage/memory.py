@@ -101,10 +101,18 @@ class ChatHistory:
 class EventHistory:
     """Durable, idempotent typed conversation events for one conversation."""
 
-    def __init__(self, conversation_id: str, history_dir: Path):
+    def __init__(
+        self, conversation_id: str, history_dir: Path, max_events: int = 1000
+    ):
+        if max_events < 1:
+            raise ValueError("max_events must be >= 1")
         self.conversation_id = conversation_id
         self.history_dir = Path(history_dir)
         self.file_path = self.history_dir / f"{conversation_storage_key(conversation_id)}.events.json"
+        self.archive_path = self.history_dir / (
+            f"{conversation_storage_key(conversation_id)}.events.archive.jsonl"
+        )
+        self.max_events = max_events
         self._lock = threading.Lock()
         self._events: list[dict] = []
         if self.file_path.exists():
@@ -123,6 +131,12 @@ class EventHistory:
                 return False
             self._events.append(dict(event))
             self.history_dir.mkdir(parents=True, exist_ok=True)
+            if len(self._events) > self.max_events:
+                archived = self._events[: len(self._events) - self.max_events]
+                with self.archive_path.open("a", encoding="utf-8") as stream:
+                    for item in archived:
+                        stream.write(json.dumps(item, ensure_ascii=False) + "\n")
+                self._events = self._events[-self.max_events :]
             temporary = self.file_path.with_suffix(self.file_path.suffix + ".tmp")
             temporary.write_text(
                 json.dumps(self._events, ensure_ascii=False, indent=2), encoding="utf-8"

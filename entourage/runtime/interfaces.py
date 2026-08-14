@@ -59,6 +59,14 @@ class GraphStore(ABC):
     def get_running_sessions(self) -> List[Dict]:
         ...
 
+    @abstractmethod
+    def get_terminal_sessions(self) -> List[Dict]:
+        """Completed and failed sessions, oldest completion first."""
+
+    @abstractmethod
+    def delete_terminal_session(self, session_id: str) -> bool:
+        """Delete one terminal session and its graph; refuse active sessions."""
+
     # ── Executions ────────────────────────────────────────────
 
     @abstractmethod

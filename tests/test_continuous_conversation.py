@@ -1,3 +1,5 @@
+import json
+
 from entourage.conversation import ContinuousConversation, ConversationPolicy
 from entourage.memory import ChatHistory, EventHistory, conversation_storage_key
 
@@ -37,6 +39,19 @@ def test_event_history_is_idempotent_and_reloadable(tmp_path):
     assert history.append(event) is True
     assert history.append({**event, "content": "duplicate"}) is False
     assert EventHistory("group:42", tmp_path).get_events() == [event]
+
+
+def test_event_history_rotates_old_events_to_append_only_archive(tmp_path):
+    history = EventHistory("group:42", tmp_path, max_events=2)
+    for number in range(3):
+        history.append({"event_id": str(number), "content": f"event {number}"})
+
+    assert [event["event_id"] for event in history.get_events()] == ["1", "2"]
+    archived = [
+        json.loads(line)
+        for line in history.archive_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["event_id"] for event in archived] == ["0"]
 
 
 def test_topic_shift_archives_segment_and_clears_history(tmp_path):

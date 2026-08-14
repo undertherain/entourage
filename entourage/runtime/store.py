@@ -70,6 +70,8 @@ class SQLiteGraphStore(GraphStore):
 
             CREATE INDEX IF NOT EXISTS idx_exec_session ON executions(session_id);
             CREATE INDEX IF NOT EXISTS idx_exec_status ON executions(status);
+            CREATE INDEX IF NOT EXISTS idx_sessions_terminal
+                ON sessions(status, completed_at);
             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_exec_id);
             CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_exec_id);
         """)
@@ -155,6 +157,29 @@ class SQLiteGraphStore(GraphStore):
             "SELECT * FROM sessions WHERE status = 'running'"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_terminal_sessions(self) -> List[Dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM sessions WHERE status IN ('completed', 'failed') "
+            "ORDER BY completed_at ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_terminal_session(self, session_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT status FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["status"] not in {"completed", "failed"}:
+            raise ValueError(f"session {session_id} is not terminal")
+        with self.conn:
+            self.conn.execute("DELETE FROM edges WHERE session_id = ?", (session_id,))
+            self.conn.execute(
+                "DELETE FROM executions WHERE session_id = ?", (session_id,)
+            )
+            self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        return True
 
     # ── Executions ────────────────────────────────────────────
 

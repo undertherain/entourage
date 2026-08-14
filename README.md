@@ -244,6 +244,11 @@ and graph-integrated waiting sessions remain the next runtime layer.
   store+queue combination gives fault-tolerant, resumable runs. The graph algebra (ready
   detection, fan-in joins, plan splicing) is shared code, tested identically across
   backends (`tests/`).
+- **Retention** — terminal execution graphs are collected incrementally under a
+  configurable TTL/count/batch policy on every graph backend. Acknowledged
+  mailbox payloads and their idempotency tombstones have separate retention;
+  typed conversation history rotates to an append-only archive. See
+  [`docs/retention.md`](docs/retention.md).
 - **`entourage/agent.py`** — high-level helpers that package the one-line Reason–Act pattern
   and compile down to the same `Sequence`/`Parallel` primitives the workers understand.
 

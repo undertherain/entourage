@@ -12,6 +12,7 @@ Key layout (under the configurable namespace):
 
   {ns}:session:{sid}        HASH  session fields (initial_state as JSON)
   {ns}:running              SET   session ids with status running
+  {ns}:terminal             ZSET  terminal session ids by completed_at
   {ns}:exec:{eid}           HASH  execution fields (states as JSON)
   {ns}:execs:{sid}          SET   execution ids of a session
   {ns}:pending:{sid}        SET   pending execution ids (ready-detection hot path)
@@ -56,6 +57,9 @@ class RedisGraphStore(GraphStore):
 
     def _running_key(self) -> str:
         return f"{self.namespace}:running"
+
+    def _terminal_key(self) -> str:
+        return f"{self.namespace}:terminal"
 
     def _ekey(self, eid: str) -> str:
         return f"{self.namespace}:exec:{eid}"
@@ -147,12 +151,14 @@ class RedisGraphStore(GraphStore):
 
     def _finish_session(self, session_id: str, status: str):
         session = self.get_session(session_id)
+        completed_at = time.time()
         pipe = self._r.pipeline()
         pipe.hset(self._skey(session_id), mapping={
             "status": status,
-            "completed_at": time.time(),
+            "completed_at": completed_at,
         })
         pipe.srem(self._running_key(), session_id)
+        pipe.zadd(self._terminal_key(), {session_id: completed_at})
         if session and session.get("serial_key"):
             pipe.delete(f"{self.namespace}:serial:{session['serial_key']}")
         pipe.execute()
@@ -166,6 +172,33 @@ class RedisGraphStore(GraphStore):
     def get_running_sessions(self) -> List[Dict]:
         ids = self._r.smembers(self._running_key()) or set()
         return [s for s in (self.get_session(sid) for sid in sorted(ids)) if s]
+
+    def get_terminal_sessions(self) -> List[Dict]:
+        ids = self._r.zrange(self._terminal_key(), 0, -1) or []
+        return [session for session in (self.get_session(sid) for sid in ids) if session]
+
+    def delete_terminal_session(self, session_id: str) -> bool:
+        session = self.get_session(session_id)
+        if session is None:
+            self._r.zrem(self._terminal_key(), session_id)
+            return False
+        if session["status"] not in {"completed", "failed"}:
+            raise ValueError(f"session {session_id} is not terminal")
+        execution_ids = sorted(self._r.smembers(self._execs_key(session_id)) or set())
+        keys = [self._skey(session_id), self._execs_key(session_id), self._pending_key(session_id)]
+        for exec_id in execution_ids:
+            keys.extend([
+                self._ekey(exec_id), self._parents_key(exec_id), self._children_key(exec_id)
+            ])
+        pipe = self._r.pipeline()
+        if keys:
+            pipe.delete(*keys)
+        pipe.srem(self._running_key(), session_id)
+        pipe.zrem(self._terminal_key(), session_id)
+        if session.get("serial_key"):
+            pipe.delete(f"{self.namespace}:serial:{session['serial_key']}")
+        pipe.execute()
+        return True
 
     # ── Executions ────────────────────────────────────────────
 

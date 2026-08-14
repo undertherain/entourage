@@ -31,9 +31,10 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from ..flow import Parallel, Sequence, RecursionLimitExceeded
 from .interfaces import GraphStore, ReadyQueue
-from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan, resolve_node
+from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan
 from .store import DEFAULT_DB_PATH, SQLiteGraphStore
 from .client import TriggerClient
+from .gc import RetentionPolicy, collect_terminal_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class QueueRuntime:
         queue_name: str = "entourage_tasks",
         region: str = "us-east-1",
         db_path: Path = DEFAULT_DB_PATH,
+        retention_policy: RetentionPolicy = RetentionPolicy(),
     ):
         self.node_registry = node_registry or {}
         self.node_policies: Dict[str, Dict[str, Any]] = {}
@@ -98,6 +100,8 @@ class QueueRuntime:
 
             queue = SQSReadyQueue(queue_name=queue_name, region=region)
         self.queue = queue
+        self.retention_policy = retention_policy
+        self._last_gc_at = 0.0
 
     # ── Registration ──────────────────────────────────────────
 
@@ -418,17 +422,33 @@ class QueueRuntime:
             messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
 
             if not messages:
+                self.collect_garbage()
                 if stop_when_idle:
                     logger.info("Queue idle, stopping.")
                     break
                 continue
 
             self._process_messages(messages)
+            self.collect_garbage()
 
     def run_once(self, poll_wait: float = 1):
         """Process one batch of messages and return. Useful for testing."""
         messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
         self._process_messages(messages)
+        self.collect_garbage()
+
+    def collect_garbage(self, force: bool = False) -> list[str]:
+        """Collect one bounded terminal-session batch when the interval is due."""
+        if self.retention_policy is None:
+            return []
+        now = time.time()
+        if not force and now - self._last_gc_at < self.retention_policy.interval_seconds:
+            return []
+        deleted = collect_terminal_sessions(self.store, self.retention_policy, now=now)
+        self._last_gc_at = now
+        if deleted:
+            logger.info("Garbage-collected %d terminal session(s)", len(deleted))
+        return deleted
 
     def _process_messages(self, messages):
         for message in messages:

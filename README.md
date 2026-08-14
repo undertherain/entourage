@@ -132,6 +132,29 @@ python3 examples/cli.py --debug
 
 More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
 
+### Continuous agents
+
+`entourage.conversation` provides a configurable loop for an agent whose
+conversation outlives any one incoming-message execution:
+
+- `ConversationPolicy` selects automatic topic-shift detection and a manual
+  reset command such as `/new`.
+- `ContinuousConversation` owns the live segment, automatic/manual compaction,
+  and prompt rebuilding around durable `ChatHistory`.
+- `ContinuousAgent` supplies the main model/tool loop while the application
+  supplies its tools and system-prompt builder.
+- `TopicMemory` supplies the litellm-based detector, summarizer, and file
+  archive; applications select its utility model and retention count.
+
+This is logical conversation continuity over turn-level execution sessions.
+A durable session that waits on a mailbox and resumes for later messages is a
+separate runtime primitive still to be designed.
+
+For multi-agent deployments, `RedisRuntimeConfig` derives graph and ready-queue
+namespaces from an application-selected prefix. Agents can share one Redis
+deployment while keeping scheduler namespaces isolated when their workers
+register different node sets.
+
 ### Minimal Telegram bot
 
 `examples/telegram_simple.py` is a small continuous-conversation demo. Each

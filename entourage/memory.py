@@ -3,6 +3,35 @@ import datetime
 import uuid
 from pathlib import Path
 
+from litellm import completion
+
+
+TOPIC_JUDGE_PROMPT = """\
+You are a topic detection system. Analyze the last message in the context of
+the recent conversation history. Does it introduce a significantly new topic?
+
+Respond with only the single word YES or NO.
+
+Recent conversation history:
+{history}
+
+Last message:
+{last}
+"""
+
+TOPIC_SUMMARIZER_PROMPT = """\
+Create a concise, one-paragraph summary of this conversation. Capture the key
+topics, questions, conclusions, decisions, and actions taken.
+"""
+
+
+def _dialogue_only(messages: list[dict]) -> list[dict]:
+    return [
+        {"role": message["role"], "content": message["content"]}
+        for message in messages
+        if message.get("role") in ("user", "assistant") and message.get("content")
+    ]
+
 class ChatHistory:
     """Manages loading, saving, and accessing conversation messages for a single chat session."""
 
@@ -76,3 +105,71 @@ class MemoryDB:
     def get_all(self) -> list[str]:
         with open(self.file_path, "r", encoding="utf-8") as f:
             return [line.strip() for line in f.readlines()]
+
+
+class TopicMemory:
+    """LLM-assisted topic segmentation with a portable file archive.
+
+    Applications decide when to call it and how summaries enter their prompt;
+    Entourage owns the reusable detection, summarization, and archive policy.
+    """
+
+    def __init__(self, archive_dir: Path, utility_model: str, summary_limit: int = 3):
+        self.archive_dir = Path(archive_dir)
+        self.model = utility_model
+        self.summary_limit = summary_limit
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+
+    def is_new_topic(self, messages: list[dict]) -> bool:
+        """Return whether the last turn changes topic; model failures continue it."""
+        dialogue = _dialogue_only(messages)
+        if len(dialogue) < 2:
+            return False
+        prompt = TOPIC_JUDGE_PROMPT.format(
+            history=json.dumps(dialogue[-5:-1], ensure_ascii=False, indent=2),
+            last=json.dumps(dialogue[-1], ensure_ascii=False),
+        )
+        try:
+            response = completion(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=5,
+            )
+            return response.choices[0].message.content.strip().upper().startswith("YES")
+        except Exception as exc:
+            print(f"[topic judge error: {exc}]")
+            return False
+
+    def summarize(self, messages: list[dict]) -> str:
+        try:
+            response = completion(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": TOPIC_SUMMARIZER_PROMPT},
+                    {
+                        "role": "user",
+                        "content": json.dumps(_dialogue_only(messages), ensure_ascii=False),
+                    },
+                ],
+            )
+            return response.choices[0].message.content
+        except Exception as exc:
+            print(f"[summarization error: {exc}]")
+            return "Summary generation failed."
+
+    def archive(self, messages: list[dict]) -> str:
+        topic_id = str(uuid.uuid4())
+        summary = self.summarize(messages)
+        (self.archive_dir / f"summary_{topic_id}.txt").write_text(summary, encoding="utf-8")
+        (self.archive_dir / f"topic_{topic_id}.json").write_text(
+            json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return topic_id
+
+    def recent_summaries(self) -> list[str]:
+        files = sorted(
+            self.archive_dir.glob("summary_*.txt"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        return [path.read_text(encoding="utf-8") for path in files[: self.summary_limit]]

@@ -1,0 +1,200 @@
+"""Durable-semantics mailboxes for events that join a running conversation."""
+
+import copy
+import threading
+import time
+import uuid
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional
+
+
+class Mailbox(ABC):
+    """Append/claim/ack contract for per-conversation event inboxes.
+
+    Claims are leases. A consumer must acknowledge incorporated events; an
+    expired lease makes them claimable again after a worker crash. Backends
+    must make append idempotent by ``event_id``.
+    """
+
+    @abstractmethod
+    def append(self, conversation_id: str, event: Dict[str, Any]) -> str:
+        """Append an event, returning its stable id (duplicates are ignored)."""
+
+    @abstractmethod
+    def claim(
+        self,
+        conversation_id: str,
+        consumer: str,
+        limit: int = 20,
+        lease_seconds: float = 30,
+    ) -> List[Dict[str, Any]]:
+        """Lease pending events in append order."""
+
+    @abstractmethod
+    def acknowledge(
+        self, conversation_id: str, consumer: str, event_ids: List[str]
+    ) -> None:
+        """Mark events leased by this consumer as durably incorporated."""
+
+    @abstractmethod
+    def release(
+        self, conversation_id: str, consumer: str, event_ids: List[str]
+    ) -> None:
+        """Return leased events to pending without acknowledging them."""
+
+
+class InMemoryMailbox(Mailbox):
+    """Thread-safe reference backend with lease and idempotence semantics."""
+
+    def __init__(self):
+        self._events: Dict[str, List[Dict[str, Any]]] = {}
+        self._event_ids: Dict[str, str] = {}
+        self._condition = threading.Condition()
+
+    def append(self, conversation_id: str, event: Dict[str, Any]) -> str:
+        if not conversation_id:
+            raise ValueError("conversation_id is required")
+        value = copy.deepcopy(event)
+        event_id = str(value.get("event_id") or uuid.uuid4().hex)
+        with self._condition:
+            known_conversation = self._event_ids.get(event_id)
+            if known_conversation is not None:
+                if known_conversation != conversation_id:
+                    raise ValueError(f"event_id {event_id!r} belongs to another conversation")
+                return event_id
+            value.update(
+                {
+                    "event_id": event_id,
+                    "conversation_id": conversation_id,
+                    "created_at": value.get("created_at", time.time()),
+                    "status": "pending",
+                    "consumer": None,
+                    "lease_until": None,
+                    "acknowledged_at": None,
+                }
+            )
+            self._events.setdefault(conversation_id, []).append(value)
+            self._event_ids[event_id] = conversation_id
+            self._condition.notify_all()
+        return event_id
+
+    def claim(
+        self,
+        conversation_id: str,
+        consumer: str,
+        limit: int = 20,
+        lease_seconds: float = 30,
+    ) -> List[Dict[str, Any]]:
+        if not consumer:
+            raise ValueError("consumer is required")
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if lease_seconds < 0:
+            raise ValueError("lease_seconds must be >= 0")
+        now = time.time()
+        claimed = []
+        with self._condition:
+            for event in self._events.get(conversation_id, []):
+                expired = (
+                    event["status"] == "leased"
+                    and event["lease_until"] is not None
+                    and event["lease_until"] <= now
+                )
+                if event["status"] != "pending" and not expired:
+                    continue
+                event["status"] = "leased"
+                event["consumer"] = consumer
+                event["lease_until"] = now + lease_seconds
+                claimed.append(self._public(event))
+                if len(claimed) == limit:
+                    break
+        return claimed
+
+    def acknowledge(
+        self, conversation_id: str, consumer: str, event_ids: List[str]
+    ) -> None:
+        with self._condition:
+            for event in self._selected(conversation_id, event_ids):
+                self._require_lease(event, consumer)
+                event["status"] = "acknowledged"
+                event["acknowledged_at"] = time.time()
+                event["consumer"] = None
+                event["lease_until"] = None
+
+    def release(
+        self, conversation_id: str, consumer: str, event_ids: List[str]
+    ) -> None:
+        with self._condition:
+            for event in self._selected(conversation_id, event_ids):
+                self._require_lease(event, consumer)
+                event["status"] = "pending"
+                event["consumer"] = None
+                event["lease_until"] = None
+            self._condition.notify_all()
+
+    def wait_for_events(self, conversation_id: str, timeout: Optional[float] = None) -> bool:
+        """Block the local demo until claimable work exists; not worker polling."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._condition:
+            while not self._has_claimable(conversation_id):
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return False
+                lease_delay = self._next_lease_delay(conversation_id)
+                waits = [value for value in (remaining, lease_delay) if value is not None]
+                self._condition.wait(min(waits) if waits else None)
+            return True
+
+    def pending_count(self, conversation_id: str) -> int:
+        with self._condition:
+            return sum(
+                event["status"] == "pending"
+                for event in self._events.get(conversation_id, [])
+            )
+
+    def _has_claimable(self, conversation_id: str) -> bool:
+        now = time.time()
+        return any(
+            event["status"] == "pending"
+            or (
+                event["status"] == "leased"
+                and event["lease_until"] is not None
+                and event["lease_until"] <= now
+            )
+            for event in self._events.get(conversation_id, [])
+        )
+
+    def _next_lease_delay(self, conversation_id: str) -> Optional[float]:
+        now = time.time()
+        expiries = [
+            event["lease_until"]
+            for event in self._events.get(conversation_id, [])
+            if event["status"] == "leased" and event["lease_until"] is not None
+        ]
+        return max(0, min(expiries) - now) if expiries else None
+
+    def _selected(self, conversation_id: str, event_ids: List[str]) -> List[Dict[str, Any]]:
+        wanted = set(event_ids)
+        found = [
+            event
+            for event in self._events.get(conversation_id, [])
+            if event["event_id"] in wanted
+        ]
+        if len(found) != len(wanted):
+            raise KeyError("one or more mailbox events were not found")
+        return found
+
+    @staticmethod
+    def _require_lease(event: Dict[str, Any], consumer: str) -> None:
+        expired = event["lease_until"] is not None and event["lease_until"] <= time.time()
+        if event["status"] != "leased" or event["consumer"] != consumer or expired:
+            raise ValueError(f"event {event['event_id']!r} is not leased by {consumer!r}")
+
+    @staticmethod
+    def _public(event: Dict[str, Any]) -> Dict[str, Any]:
+        result = copy.deepcopy(event)
+        result.pop("status", None)
+        result.pop("consumer", None)
+        result.pop("lease_until", None)
+        result.pop("acknowledged_at", None)
+        return result

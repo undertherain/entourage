@@ -132,6 +132,15 @@ python3 examples/cli.py --debug
 
 More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
 
+To see Codex-like interjections without credentials, run the in-memory mailbox
+checkpoint demo. While it prints that it is working, enter another user message,
+`/subagent ...`, or `/ambient ...`; the event is ingested only at the next named
+safe point:
+
+```bash
+python3 -m examples.mailbox_cli
+```
+
 ### Continuous agents
 
 `entourage.conversation` provides a configurable loop for an agent whose
@@ -148,7 +157,10 @@ conversation outlives any one incoming-message execution:
 
 This is logical conversation continuity over turn-level execution sessions.
 A durable session that waits on a mailbox and resumes for later messages is a
-separate runtime primitive still to be designed.
+separate runtime primitive still to be designed. The agreed event model,
+safe-point ingestion semantics, and independent conversation/context/graph
+retention policies are recorded in
+[`docs/conversation-mailboxes.md`](docs/conversation-mailboxes.md).
 
 For multi-agent deployments, `RedisRuntimeConfig` derives graph and ready-queue
 namespaces from an application-selected prefix. Agents can share one Redis

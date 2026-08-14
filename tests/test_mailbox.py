@@ -118,3 +118,21 @@ def test_cli_generates_reply_with_configured_model(monkeypatch):
     assert generate_reply("tiny/model", [{"role": "user", "content": "2+2?"}]) == "four"
     assert captured["model"] == "tiny/model"
     assert captured["messages"][-1] == {"role": "user", "content": "2+2?"}
+    assert "max_tokens" not in captured
+
+
+def test_cli_rejects_empty_model_output(monkeypatch):
+    monkeypatch.setattr(
+        mailbox_cli,
+        "completion",
+        lambda **_kwargs: SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=None), finish_reason="length"
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="finish_reason=length"):
+        generate_reply("tiny/model", [{"role": "user", "content": "hello"}])

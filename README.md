@@ -132,14 +132,18 @@ python3 examples/cli.py --debug
 
 More examples live in `examples/` (`telegram_*.py`, `coding_agent.py`).
 
-To see Codex-like interjections without credentials, run the in-memory mailbox
-checkpoint demo. While it prints that it is working, enter another user message,
-`/subagent ...`, or `/ambient ...`; the event is ingested only at the next named
-safe point:
+To see Codex-like interjections, run the in-memory mailbox checkpoint demo.
+It uses LiteLLM with `gpt-5-nano` by default and inserts short artificial work
+stages so there is time to enqueue another user message, `/subagent ...`, or
+`/ambient ...`. Events drained before the model call are included in that same
+answer:
 
 ```bash
 python3 -m examples.mailbox_cli
 ```
+
+Select another model or change the timing with `MAILBOX_DEMO_MODEL` and
+`MAILBOX_DEMO_STEP_DELAY`.
 
 The demo uses a redraw-safe message composer: background checkpoint output is
 rendered above it without destroying a partially typed message.

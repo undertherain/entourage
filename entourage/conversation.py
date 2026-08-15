@@ -76,12 +76,15 @@ class ContinuousAgent:
         system_prompt: Callable[[], str],
         debug: bool = False,
         runtime_factory: Callable[..., Runtime] = Runtime,
+        model_params: Optional[dict] = None,
     ):
         self.conversation = conversation
         self.system_prompt = system_prompt
         self.debug = debug
         self.runtime_factory = runtime_factory
-        self.agent = PersistableAgent(model, tools, conversation.history, debug=debug)
+        self.agent = PersistableAgent(
+            model, tools, conversation.history, debug=debug, model_params=model_params
+        )
 
     def handle(self, text: str) -> str:
         if self.conversation.policy.reset_command == text.strip():

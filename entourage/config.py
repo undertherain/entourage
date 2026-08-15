@@ -2,7 +2,7 @@
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
 
@@ -133,6 +133,9 @@ class AgentManifest:
     manifest_path: Path
     setup: Optional[str] = None
     conversation: ConversationConfig = ConversationConfig()
+    # Extra kwargs passed verbatim to every main-model completion call
+    # (e.g. reasoning_effort for models that reject tools while reasoning).
+    model_params: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def chat_dir(self) -> Path:
@@ -168,6 +171,9 @@ def load_agent_manifest(path: Path, environ: Mapping[str, str] = os.environ) -> 
     tools = raw.get("tools") or []
     if not isinstance(tools, list) or not all(isinstance(item, str) for item in tools):
         raise ValueError("agent.tools must be a list of import strings")
+    model_params = raw.get("model_params") or {}
+    if not isinstance(model_params, Mapping):
+        raise ValueError("agent.model_params must be a mapping")
 
     agent_id = str(raw["id"])
     runtime_raw = raw.get("runtime")
@@ -205,6 +211,10 @@ def load_agent_manifest(path: Path, environ: Mapping[str, str] = os.environ) -> 
         tools=tuple(tools),
         setup=str(raw["setup"]) if raw.get("setup") else None,
         manifest_path=manifest_path,
+        model_params={
+            str(key): resolve_value(value, environ)
+            for key, value in model_params.items()
+        },
         conversation=ConversationConfig(
             topic_shift_detection=bool(conversation.get("topic_shift_detection", True)),
             reset_command=str(conversation.get("reset_command", "/new")),

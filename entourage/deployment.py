@@ -65,6 +65,7 @@ class ConfiguredAgent:
             conversation,
             self.system_prompt,
             debug=debug,
+            model_params=dict(manifest.model_params),
         )
 
     def system_prompt(self) -> str:

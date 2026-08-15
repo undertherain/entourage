@@ -9,11 +9,12 @@ from .utils import pprint
 
 
 class AgentWithTools:
-    def __init__(self, model, tools, base_url=None, debug=False):
+    def __init__(self, model, tools, base_url=None, debug=False, model_params=None):
         self.model = model
         self.tools = tools
         self.debug = debug
         self.base_url = base_url
+        self.model_params = dict(model_params or {})
         self.tools_schemas = []
         self.available_tools = {}
         if tools:
@@ -38,6 +39,7 @@ class AgentWithTools:
             }
             if self.base_url:
                 kwargs["base_url"] = self.base_url
+            kwargs.update(self.model_params)
                 
             import warnings
             with warnings.catch_warnings():
@@ -128,17 +130,24 @@ class ToolWrapper:
 
     def __call__(self, state):
         import json
-        
+        import traceback
+
         # Extract arguments from the bound tool_call object
         # tool_call is a litellm/OpenAI object with .function.arguments (string) and .id
         fc = self.tool_call.function
-        args = json.loads(fc.arguments)
-        
+
         print(f"[System] Calling tool: {fc.name}")
-        
-        # Execute the tool
-        tool_result = self.tool.execute(**args)
-        
+
+        # Execute the tool. A failure (bad arguments, validation error, network
+        # outage) must flow back to the model as the tool result — raising here
+        # kills the whole runtime node and the agent goes silent.
+        try:
+            args = json.loads(fc.arguments)
+            tool_result = self.tool.execute(**args)
+        except Exception as exc:
+            traceback.print_exc()
+            tool_result = f"Tool error ({type(exc).__name__}): {exc}"
+
         # Append result to state
         tool_message = {
             "role": "tool",
@@ -155,8 +164,9 @@ class ToolWrapper:
 
 
 class PersistableAgent(AgentWithTools):
-    def __init__(self, model, tools, history, return_node=None, base_url=None, debug=False):
-        super().__init__(model, tools, base_url=base_url, debug=debug)
+    def __init__(self, model, tools, history, return_node=None, base_url=None, debug=False,
+                 model_params=None):
+        super().__init__(model, tools, base_url=base_url, debug=debug, model_params=model_params)
         self.history = history
         self.return_node = return_node
         

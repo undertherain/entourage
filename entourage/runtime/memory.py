@@ -119,6 +119,7 @@ class InMemoryGraphStore(GraphStore):
             "policy": copy.deepcopy(policy) if policy else None,
             "last_error": None,
             "retry_at": None,
+            "effects": None,
             "created_at": time.time(),
             "started_at": None,
             "completed_at": None,
@@ -164,6 +165,16 @@ class InMemoryGraphStore(GraphStore):
         ex["result_state"] = {"error": error}
         ex["last_error"] = error
         ex["completed_at"] = time.time()
+
+    def set_effects(self, exec_id: str, effects=None):
+        self._executions[exec_id]["effects"] = copy.deepcopy(effects)
+
+    def get_pending_effect_executions(self) -> List[Dict]:
+        return [
+            copy.deepcopy(ex)
+            for ex in self._executions.values()
+            if ex.get("effects")
+        ]
 
     # ── Edges ─────────────────────────────────────────────────
 

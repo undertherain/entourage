@@ -121,17 +121,23 @@ class SQLiteGraphStore(GraphStore):
             ("policy", "TEXT"),
             ("last_error", "TEXT"),
             ("retry_at", "REAL"),
+            ("effects", "TEXT"),
         ):
             if column not in existing:
                 self.conn.execute(
                     f"ALTER TABLE executions ADD COLUMN {column} {decl}"
                 )
+        # Outbox index: pending-effects lookups never scan the table.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_exec_effects ON executions(id) "
+            "WHERE effects IS NOT NULL"
+        )
         self._commit()
 
     @staticmethod
     def _decode_execution(row) -> Dict:
         d = dict(row)
-        for field in ("input_state", "result_state", "policy"):
+        for field in ("input_state", "result_state", "policy", "effects"):
             if d.get(field):
                 d[field] = json.loads(d[field])
         return d
@@ -280,6 +286,19 @@ class SQLiteGraphStore(GraphStore):
         )
         self._commit()
 
+    def set_effects(self, exec_id: str, effects=None):
+        self.conn.execute(
+            "UPDATE executions SET effects = ? WHERE id = ?",
+            (json.dumps(effects) if effects is not None else None, exec_id),
+        )
+        self._commit()
+
+    def get_pending_effect_executions(self) -> List[Dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM executions WHERE effects IS NOT NULL"
+        ).fetchall()
+        return [self._decode_execution(r) for r in rows]
+
     # ── Edges ─────────────────────────────────────────────────
 
     def add_edge(
@@ -334,11 +353,12 @@ class SQLiteGraphStore(GraphStore):
         result_state: Dict[str, Any],
         staged=None,
         children=None,
+        effects=None,
     ):
         """Atomic override: the whole transition is one SQLite transaction."""
         with self._transaction():
             super().commit_transition(
-                exec_id, session_id, result_state, staged, children
+                exec_id, session_id, result_state, staged, children, effects
             )
 
     def close(self):

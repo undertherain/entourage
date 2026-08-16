@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
 from ..flow import Parallel, Sequence, RecursionLimitExceeded
+from ..transition import normalize_result
 from .interfaces import GraphStore, ReadyQueue
 from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan, stage_plan
 from .store import DEFAULT_DB_PATH, SQLiteGraphStore
@@ -91,10 +92,15 @@ class QueueRuntime:
         db_path: Path = DEFAULT_DB_PATH,
         retention_policy: RetentionPolicy = RetentionPolicy(),
         mailbox=None,
+        mailbox_resolver: Callable[[str], Any] = None,
     ):
         self.node_registry = node_registry or {}
         self.node_policies: Dict[str, Dict[str, Any]] = {}
         self.pipelines: Dict[str, PipelineTemplate] = {}
+        # Maps opaque publication targets to Mailbox instances. Addresses
+        # stay stable names behind this injectable seam — never hostnames
+        # or backend details. Default: only "self" resolves, to `mailbox`.
+        self.mailbox_resolver = mailbox_resolver
         self.store = store if store is not None else SQLiteGraphStore(db_path)
         if queue is None:
             from .sqs import SQSReadyQueue
@@ -291,22 +297,16 @@ class QueueRuntime:
             fn = self.node_registry[node_name]
             result = _call_with_timeout(fn, input_state, policy.get("timeout"))
 
-            # Support two return styles:
-            # 1. (new_state, plan) — Entourage style
-            # 2. new_state — simple style (refs/workflow compat)
-            if isinstance(result, tuple) and len(result) == 2:
-                new_state, plan = result
-            else:
-                new_state, plan = result, None
-
             # The node's return is a proposed transition: result state, an
-            # optional plan splice, and the rewiring around it. Reads and
-            # staging happen first; then the store commits the whole
-            # transition as one unit, so a crash leaves either the complete
-            # transition or a still-running execution recovery will re-run —
-            # never a completed node whose returned plan was lost.
+            # optional plan splice with its rewiring, and mailbox effects.
+            # Reads, staging, and effect validation happen first; then the
+            # store commits the whole transition as one unit, so a crash
+            # leaves either the complete transition or a still-running
+            # execution recovery will re-run — never a completed node whose
+            # returned plan or effects were lost.
+            transition = normalize_result(result)
             staged = children = None
-            if plan is not None:
+            if transition.plan is not None:
                 executions = self.store.get_session_executions(session_id)
                 if len(executions) >= MAX_SESSION_NODES:
                     raise RecursionLimitExceeded(
@@ -315,12 +315,18 @@ class QueueRuntime:
                 counts: Dict[str, int] = {}
                 for ex in executions:
                     counts[ex["node_name"]] = counts.get(ex["node_name"], 0) + 1
-                staged = stage_plan(plan, self.node_registry, existing_counts=counts)
+                staged = stage_plan(
+                    transition.plan, self.node_registry, existing_counts=counts
+                )
                 children = self.store.get_children(exec_id)
+            effects = self._stage_effects(exec_id, transition)
 
             self.store.commit_transition(
-                exec_id, session_id, new_state, staged, children
+                exec_id, session_id, transition.state, staged, children, effects
             )
+
+            if effects is not None:
+                self._apply_effects_guarded(exec_id, effects)
 
             self._enqueue_ready(session_id)
 
@@ -347,6 +353,92 @@ class QueueRuntime:
                 )
                 self.store.mark_failed(exec_id, str(e))
                 self.store.fail_session(session_id)
+
+    # ── Mailbox effects (transactional outbox) ────────────────
+
+    def _resolve_mailbox(self, target: str):
+        if self.mailbox_resolver is not None:
+            return self.mailbox_resolver(target)
+        if target == "self" and self.mailbox is not None:
+            return self.mailbox
+        raise KeyError(f"no mailbox resolves for publication target {target!r}")
+
+    def _stage_effects(self, exec_id: str, transition) -> Optional[Dict[str, Any]]:
+        """Serialize a transition's mailbox effects for the commit.
+
+        Validation happens here, before anything is committed: an
+        unresolvable publication target or an acknowledgement without a
+        configured mailbox fails the node through the normal retry/fail
+        path instead of leaving a committed transition with undeliverable
+        effects. Publication idempotency keys are derived deterministically
+        from the committing execution, so a replay cannot double-deliver.
+        """
+        if not transition.has_effects:
+            return None
+        if transition.acknowledge and self.mailbox is None:
+            raise ValueError(
+                "transition acknowledges mailbox events, but the runtime "
+                "has no mailbox configured"
+            )
+        effects: Dict[str, Any] = {}
+        if transition.acknowledge:
+            effects["acknowledge"] = [
+                {
+                    "conversation_id": ack.conversation_id,
+                    "event_ids": list(ack.event_ids),
+                }
+                for ack in transition.acknowledge
+            ]
+        if transition.publish:
+            publications = []
+            for index, pub in enumerate(transition.publish):
+                self._resolve_mailbox(pub.target)
+                publications.append({
+                    "target": pub.target,
+                    "conversation": pub.conversation,
+                    "event": pub.event,
+                    "event_id": pub.event_id or f"txn-{exec_id}-{index}",
+                })
+            effects["publish"] = publications
+        return effects
+
+    def _apply_effects(self, exec_id: str, effects: Dict[str, Any]):
+        """Apply a committed transition's mailbox effects, then clear them.
+
+        Idempotent by construction — acknowledgements use force semantics
+        (the commit, not the lease, is the proof of incorporation) and
+        publications append with fixed event ids the mailboxes dedupe on —
+        so a crash anywhere in here is repaired by replaying at recovery.
+        """
+        for ack in effects.get("acknowledge", []):
+            self.mailbox.acknowledge(
+                ack["conversation_id"],
+                consumer="runtime",
+                event_ids=ack["event_ids"],
+                force=True,
+            )
+        for pub in effects.get("publish", []):
+            event = dict(pub["event"])
+            event["event_id"] = pub["event_id"]
+            self._resolve_mailbox(pub["target"]).append(pub["conversation"], event)
+        self.store.set_effects(exec_id, None)
+
+    def _apply_effects_guarded(self, exec_id: str, effects: Dict[str, Any]):
+        """Apply effects without failing the already-committed node.
+
+        A delivery failure after commit is an outbox problem, not a node
+        problem: the transition is durable, so the node must not re-enter
+        the retry path. Effects stay pending on the execution and are
+        replayed at the next startup recovery.
+        """
+        try:
+            self._apply_effects(exec_id, effects)
+        except Exception:
+            logger.exception(
+                "Mailbox effects of %s failed to apply; they remain pending "
+                "and will replay on recovery",
+                exec_id,
+            )
 
     # ── Queue operations ──────────────────────────────────────
 
@@ -452,6 +544,18 @@ class QueueRuntime:
                     ex["id"], error="recovered: worker stopped mid-execution"
                 )
             self._enqueue_ready(session["id"])
+
+        # Replay committed-but-unapplied mailbox effects (crash landed
+        # between the transition commit and effect application, or a
+        # delivery failed). The outbox index covers terminal sessions too —
+        # a delivery failure does not stop a session, so pending effects
+        # can outlive its completion. Application is idempotent, so
+        # replaying after a partial apply is safe.
+        for ex in self.store.get_pending_effect_executions():
+            logger.warning(
+                "Replaying pending mailbox effects of execution %s", ex["id"]
+            )
+            self._apply_effects_guarded(ex["id"], ex["effects"])
 
         while True:
             messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)

@@ -38,9 +38,20 @@ class Mailbox(ABC):
 
     @abstractmethod
     def acknowledge(
-        self, conversation_id: str, consumer: str, event_ids: List[str]
+        self,
+        conversation_id: str,
+        consumer: str,
+        event_ids: List[str],
+        force: bool = False,
     ) -> None:
-        """Mark events leased by this consumer as durably incorporated."""
+        """Mark events leased by this consumer as durably incorporated.
+
+        With ``force=True`` the lease check is skipped and unknown or
+        already-acknowledged events are ignored. This exists for replaying a
+        committed transition's acknowledgements after a crash: by then the
+        commit — not the lease, which may have expired — is the proof of
+        incorporation, and replay must be idempotent.
+        """
 
     @abstractmethod
     def release(
@@ -157,11 +168,26 @@ class InMemoryMailbox(Mailbox):
         return self.claim(conversation_id, consumer, limit, lease_seconds)
 
     def acknowledge(
-        self, conversation_id: str, consumer: str, event_ids: List[str]
+        self,
+        conversation_id: str,
+        consumer: str,
+        event_ids: List[str],
+        force: bool = False,
     ) -> None:
         with self._condition:
-            for event in self._selected(conversation_id, event_ids):
-                self._require_lease(event, consumer)
+            if force:
+                wanted = set(event_ids)
+                events = [
+                    event
+                    for event in self._events.get(conversation_id, [])
+                    if event["event_id"] in wanted
+                    and event["status"] != "acknowledged"
+                ]
+            else:
+                events = self._selected(conversation_id, event_ids)
+            for event in events:
+                if not force:
+                    self._require_lease(event, consumer)
                 event["status"] = "acknowledged"
                 event["acknowledged_at"] = time.time()
                 event["consumer"] = None

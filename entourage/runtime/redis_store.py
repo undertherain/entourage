@@ -70,6 +70,9 @@ class RedisGraphStore(GraphStore):
     def _pending_key(self, sid: str) -> str:
         return f"{self.namespace}:pending:{sid}"
 
+    def _outbox_key(self) -> str:
+        return f"{self.namespace}:outbox"
+
     def _parents_key(self, eid: str) -> str:
         return f"{self.namespace}:parents:{eid}"
 
@@ -90,6 +93,7 @@ class RedisGraphStore(GraphStore):
             "attempts": int(d.get("attempts", 0)),
             "policy": json.loads(d["policy"]) if d.get("policy") else None,
             "last_error": d.get("last_error") or None,
+            "effects": json.loads(d["effects"]) if d.get("effects") else None,
         }
         for f in _JSON_FIELDS:
             out[f] = json.loads(d[f]) if d.get(f) else None
@@ -193,6 +197,8 @@ class RedisGraphStore(GraphStore):
         pipe = self._r.pipeline()
         if keys:
             pipe.delete(*keys)
+        if execution_ids:
+            pipe.srem(self._outbox_key(), *execution_ids)
         pipe.srem(self._running_key(), session_id)
         pipe.zrem(self._terminal_key(), session_id)
         if session.get("serial_key"):
@@ -299,6 +305,22 @@ class RedisGraphStore(GraphStore):
             "completed_at": time.time(),
         })
 
+    def set_effects(self, exec_id: str, effects=None):
+        pipe = self._r.pipeline()
+        if effects is None:
+            pipe.hdel(self._ekey(exec_id), "effects")
+            pipe.srem(self._outbox_key(), exec_id)
+        else:
+            pipe.hset(self._ekey(exec_id), "effects", json.dumps(effects))
+            pipe.sadd(self._outbox_key(), exec_id)
+        pipe.execute()
+
+    def get_pending_effect_executions(self) -> List[Dict]:
+        ids = self._r.smembers(self._outbox_key()) or set()
+        return [
+            ex for ex in self._get_executions(sorted(ids)) if ex.get("effects")
+        ]
+
     # ── Edges ─────────────────────────────────────────────────
     # Conditions are stored on both directions; "" encodes None.
 
@@ -356,6 +378,7 @@ class RedisGraphStore(GraphStore):
         result_state: Dict[str, Any],
         staged=None,
         children=None,
+        effects=None,
     ):
         """Atomic override: every write of the transition is buffered onto
         one MULTI/EXEC pipeline, so the commit lands entirely or not at all.
@@ -396,11 +419,15 @@ class RedisGraphStore(GraphStore):
             for child_id, condition in children or []:
                 pipe.hset(self._children_key(staged.end), child_id, condition or "")
                 pipe.hset(self._parents_key(child_id), staged.end, condition or "")
-        pipe.hset(self._ekey(exec_id), mapping={
+        completion = {
             "status": "completed",
             "result_state": json.dumps(result_state),
             "completed_at": now,
-        })
+        }
+        if effects is not None:
+            completion["effects"] = json.dumps(effects)
+            pipe.sadd(self._outbox_key(), exec_id)
+        pipe.hset(self._ekey(exec_id), mapping=completion)
         pipe.srem(self._pending_key(session_id), exec_id)
         pipe.execute()
 

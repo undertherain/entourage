@@ -178,11 +178,26 @@ class RedisMailbox(Mailbox):
             raise ValueError(f"event {event['event_id']!r} is not leased by {consumer!r}")
 
     def acknowledge(
-        self, conversation_id: str, consumer: str, event_ids: List[str]
+        self,
+        conversation_id: str,
+        consumer: str,
+        event_ids: List[str],
+        force: bool = False,
     ) -> None:
         with self._lock():
-            for event in self._selected(conversation_id, event_ids):
-                self._require_lease(event, consumer)
+            if force:
+                events = [
+                    event
+                    for event in (self._load(eid) for eid in set(event_ids))
+                    if event
+                    and event["conversation_id"] == conversation_id
+                    and event["status"] != "acknowledged"
+                ]
+            else:
+                events = self._selected(conversation_id, event_ids)
+            for event in events:
+                if not force:
+                    self._require_lease(event, consumer)
                 event.update({
                     "status": "acknowledged",
                     "acknowledged_at": time.time(),

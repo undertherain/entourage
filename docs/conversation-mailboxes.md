@@ -106,8 +106,16 @@ Names are provisional; behavior is the contract:
 - Event append wakes a waiting session and places only a ready-work pointer on
   the queue.
 - Recovery must not lose events between claim, state persistence, and
-  acknowledgement. The precise lease/transaction boundary needs design and
-  fault-injection tests.
+  acknowledgement. ~~The precise lease/transaction boundary needs design and
+  fault-injection tests.~~ Settled and implemented for graph-node consumers:
+  the graph-store commit of a node's `Transition` is the linearization
+  point. Acknowledgements and outbox publications are recorded inside that
+  commit, applied to the mailboxes afterwards, and replayed idempotently at
+  recovery (force-ack ignores expired leases — the commit is the proof of
+  incorporation; publications carry deterministic `event_id`s the mailboxes
+  dedupe on). Fault-injection tests: `tests/test_transition_effects.py`.
+  Loop-based consumers (`AgentWorker`) keep plain lease/ack semantics — the
+  mailbox is a contract plane; the durable engine is one consumer of it.
 - An interrupt or cancellation policy distinct from ordinary informational
   interjections.
 

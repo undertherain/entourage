@@ -18,9 +18,11 @@ Execution dicts carry at least: ``id``, ``session_id``, ``node_name``,
 ``status`` (pending | running | completed | failed), ``input_state``,
 ``result_state``, ``attempts`` (times the execution entered running),
 ``policy`` (per-execution retry/timeout policy dict, or None),
-``last_error`` (message of the most recent failed attempt, or None) and
+``last_error`` (message of the most recent failed attempt, or None),
 ``retry_at`` (epoch seconds before which a retrying execution must not
-run, or None).
+run, or None) and ``effects`` (a committed transition's not-yet-applied
+mailbox effects — acknowledgements and outbox publications — or None once
+applied; see ``commit_transition``).
 Parent dicts returned by ``get_parents`` additionally carry the
 ``condition`` of the connecting edge (or None).
 """
@@ -116,6 +118,20 @@ class GraphStore(ABC):
     @abstractmethod
     def mark_failed(self, exec_id: str, error: str = None):
         """Terminal failure: no further attempts will be made."""
+
+    @abstractmethod
+    def set_effects(self, exec_id: str, effects: Optional[Dict[str, Any]]):
+        """Store (or with ``None`` clear) an execution's pending mailbox
+        effects. Written inside ``commit_transition``; cleared by the
+        runtime once the effects were applied to the mailboxes."""
+
+    @abstractmethod
+    def get_pending_effect_executions(self) -> List[Dict]:
+        """Executions whose committed effects were not yet applied.
+
+        This is the outbox index. It must cover terminal sessions too: a
+        delivery failure does not stop the session, so pending effects can
+        outlive its completion and must still be found at recovery."""
 
     # ── Edges ─────────────────────────────────────────────────
 
@@ -247,6 +263,7 @@ class GraphStore(ABC):
         result_state: Dict[str, Any],
         staged=None,
         children: List[Tuple[str, Optional[str]]] = None,
+        effects: Dict[str, Any] = None,
     ):
         """Commit a node's returned transition as one unit.
 
@@ -261,7 +278,12 @@ class GraphStore(ABC):
         ``staged`` is a ``StagedPlan`` (or ``None`` for a plain completion);
         ``children`` is the node's pre-read outgoing edge list from
         ``get_children``, passed in so atomic overrides need no reads inside
-        their transaction scope.
+        their transaction scope. ``effects`` is the transition's serialized
+        mailbox effects (acknowledgements and outbox publications): the
+        graph-store commit is the linearization point, so effects are
+        recorded here and applied to the mailboxes afterwards, idempotently,
+        by the runtime — which clears them via ``set_effects`` once done and
+        replays any still-pending effects at recovery.
 
         This base implementation applies the primitives sequentially and is
         NOT atomic. It orders writes so that a crash mid-commit re-runs the
@@ -289,6 +311,8 @@ class GraphStore(ABC):
                 self.add_edge(session_id, exec_id, start_id)
             for child_id, condition in children or []:
                 self.add_edge(session_id, staged.end, child_id, condition)
+        if effects is not None:
+            self.set_effects(exec_id, effects)
         self.mark_completed(exec_id, result_state)
 
 

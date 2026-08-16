@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from ..flow import Parallel, Sequence, RecursionLimitExceeded
 from .interfaces import GraphStore, ReadyQueue
-from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan
+from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan, stage_plan
 from .store import DEFAULT_DB_PATH, SQLiteGraphStore
 from .client import TriggerClient
 from .gc import RetentionPolicy, collect_terminal_sessions
@@ -299,21 +299,28 @@ class QueueRuntime:
             else:
                 new_state, plan = result, None
 
-            self.store.mark_completed(exec_id, new_state)
-
-            # If the node returned a dynamic plan, inject it
+            # The node's return is a proposed transition: result state, an
+            # optional plan splice, and the rewiring around it. Reads and
+            # staging happen first; then the store commits the whole
+            # transition as one unit, so a crash leaves either the complete
+            # transition or a still-running execution recovery will re-run —
+            # never a completed node whose returned plan was lost.
+            staged = children = None
             if plan is not None:
-                if len(self.store.get_session_executions(session_id)) >= MAX_SESSION_NODES:
+                executions = self.store.get_session_executions(session_id)
+                if len(executions) >= MAX_SESSION_NODES:
                     raise RecursionLimitExceeded(
                         f"Session {session_id} exceeded global hard limit of {MAX_SESSION_NODES} executions"
                     )
+                counts: Dict[str, int] = {}
+                for ex in executions:
+                    counts[ex["node_name"]] = counts.get(ex["node_name"], 0) + 1
+                staged = stage_plan(plan, self.node_registry, existing_counts=counts)
+                children = self.store.get_children(exec_id)
 
-                plan_starts, plan_end = expand_plan(
-                    self.store, session_id, plan, self.node_registry
-                )
-                self.store.rewire_after_plan_injection(
-                    exec_id, plan_starts, plan_end, session_id
-                )
+            self.store.commit_transition(
+                exec_id, session_id, new_state, staged, children
+            )
 
             self._enqueue_ready(session_id)
 
@@ -429,6 +436,21 @@ class QueueRuntime:
         # Crash recovery: check for any sessions that were running
         for session in self.store.get_running_sessions():
             logger.info("Recovering session %s", session["id"])
+            # An execution still 'running' at startup is a worker that died
+            # mid-node: nothing of its transition committed (the commit is
+            # atomic), so return it to pending for re-execution. This assumes
+            # one worker per store namespace — the current deployment shape;
+            # multi-worker recovery needs leases (worker-hardening TODO).
+            for ex in self.store.get_session_executions(
+                session["id"], status="running"
+            ):
+                logger.warning(
+                    "Re-queueing execution %s (%s) left running by a dead worker",
+                    ex["id"], ex["node_name"],
+                )
+                self.store.mark_retrying(
+                    ex["id"], error="recovered: worker stopped mid-execution"
+                )
             self._enqueue_ready(session["id"])
 
         while True:

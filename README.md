@@ -259,6 +259,12 @@ durable backend family. Graph-integrated waiting sessions remain the next layer.
   store+queue combination gives fault-tolerant, resumable runs. The graph algebra (ready
   detection, fan-in joins, plan splicing) is shared code, tested identically across
   backends (`tests/`).
+  A node's returned `(state, plan)` is a *proposed transition*: the runtime stages the
+  plan first, then commits result state, spliced plan, and rewiring as **one atomic
+  store operation** (`commit_transition` — a SQLite transaction, a Redis MULTI). A crash
+  mid-commit therefore re-runs the node on recovery instead of silently losing the plan
+  it returned; fault-injection tests in `tests/test_transition_commit.py` pin this down.
+  Computation proposes; the runtime commits.
 - **Retention** — terminal execution graphs are collected incrementally under a
   configurable TTL/count/batch policy on every graph backend. Acknowledged
   mailbox payloads and their idempotency tombstones have separate retention;

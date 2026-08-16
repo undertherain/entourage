@@ -238,6 +238,59 @@ class GraphStore(ABC):
             "edges": self.get_session_edges(session_id),
         }
 
+    # ── Transition commit ─────────────────────────────────────
+
+    def commit_transition(
+        self,
+        exec_id: str,
+        session_id: str,
+        result_state: Dict[str, Any],
+        staged=None,
+        children: List[Tuple[str, Optional[str]]] = None,
+    ):
+        """Commit a node's returned transition as one unit.
+
+        A node's return value proposes a transition: its result state, an
+        optional plan to splice in after it, and the rewiring of its
+        outgoing edges around that plan. Committing those as independently
+        durable writes creates a silent-loss window — completed-but-plan-
+        lost is the worst case, because the idempotence guard (only pending
+        work runs) then correctly refuses to re-run the node, and the
+        session flows on without the work the node scheduled.
+
+        ``staged`` is a ``StagedPlan`` (or ``None`` for a plain completion);
+        ``children`` is the node's pre-read outgoing edge list from
+        ``get_children``, passed in so atomic overrides need no reads inside
+        their transaction scope.
+
+        This base implementation applies the primitives sequentially and is
+        NOT atomic. It orders writes so that a crash mid-commit re-runs the
+        node instead of silently truncating (``mark_completed`` goes last),
+        but a partial commit can still leave orphaned pending executions.
+        Backends that persist beyond the process lifetime must override
+        this with a real transaction (see the SQLite and Redis stores); for
+        the in-memory store non-atomicity is acceptable because the store
+        dies with the process anyway.
+        """
+        if staged is not None:
+            for ex in staged.executions:
+                self.add_execution(
+                    session_id,
+                    ex["node_name"],
+                    exec_id=ex["exec_id"],
+                    policy=ex["policy"],
+                )
+            for from_id, to_id, condition in staged.edges:
+                self.add_edge(session_id, from_id, to_id, condition)
+            # Rewire: node → [children] becomes node → starts … end → [children]
+            for child_id, _ in children or []:
+                self.remove_edge(exec_id, child_id)
+            for start_id in staged.starts:
+                self.add_edge(session_id, exec_id, start_id)
+            for child_id, condition in children or []:
+                self.add_edge(session_id, staged.end, child_id, condition)
+        self.mark_completed(exec_id, result_state)
+
 
 class QueueMessage(ABC):
     """A received queue message. ``payload`` is the decoded dict."""

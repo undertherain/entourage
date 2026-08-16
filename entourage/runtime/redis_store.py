@@ -347,6 +347,63 @@ class RedisGraphStore(GraphStore):
                 })
         return edges
 
+    # ── Transition commit ─────────────────────────────────────
+
+    def commit_transition(
+        self,
+        exec_id: str,
+        session_id: str,
+        result_state: Dict[str, Any],
+        staged=None,
+        children=None,
+    ):
+        """Atomic override: every write of the transition is buffered onto
+        one MULTI/EXEC pipeline, so the commit lands entirely or not at all.
+
+        No reads happen inside — ``session_id`` and the pre-read
+        ``children`` come from the caller, and staged execution ids were
+        generated client-side — so the whole write-set queues before a
+        single ``execute()``.
+        """
+        now = time.time()
+        pipe = self._r.pipeline(transaction=True)
+        if staged is not None:
+            for ex in staged.executions:
+                eid = ex["exec_id"]
+                mapping = {
+                    "id": eid,
+                    "session_id": session_id,
+                    "node_name": ex["node_name"],
+                    "status": "pending",
+                    "attempts": 0,
+                    "created_at": now,
+                }
+                if ex["policy"]:
+                    mapping["policy"] = json.dumps(ex["policy"])
+                pipe.hset(self._ekey(eid), mapping=mapping)
+                pipe.sadd(self._execs_key(session_id), eid)
+                pipe.sadd(self._pending_key(session_id), eid)
+            for from_id, to_id, condition in staged.edges:
+                pipe.hset(self._children_key(from_id), to_id, condition or "")
+                pipe.hset(self._parents_key(to_id), from_id, condition or "")
+            # Rewire: node → [children] becomes node → starts … end → [children]
+            for child_id, _ in children or []:
+                pipe.hdel(self._children_key(exec_id), child_id)
+                pipe.hdel(self._parents_key(child_id), exec_id)
+            for start_id in staged.starts:
+                pipe.hset(self._children_key(exec_id), start_id, "")
+                pipe.hset(self._parents_key(start_id), exec_id, "")
+            for child_id, condition in children or []:
+                pipe.hset(self._children_key(staged.end), child_id, condition or "")
+                pipe.hset(self._parents_key(child_id), staged.end, condition or "")
+        pipe.hset(self._ekey(exec_id), mapping={
+            "status": "completed",
+            "result_state": json.dumps(result_state),
+            "completed_at": now,
+        })
+        pipe.srem(self._pending_key(session_id), exec_id)
+        pipe.execute()
+
     # ── Maintenance ───────────────────────────────────────────
 
     def purge(self) -> int:

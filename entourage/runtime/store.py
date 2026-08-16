@@ -10,6 +10,7 @@ import json
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,7 +31,33 @@ class SQLiteGraphStore(GraphStore):
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self._suspend_commits = False
         self._create_tables()
+
+    def _commit(self):
+        """Commit unless inside a ``_transaction()`` scope."""
+        if not self._suspend_commits:
+            self.conn.commit()
+
+    @contextmanager
+    def _transaction(self):
+        """Group primitive calls into one SQLite transaction.
+
+        Primitives normally autocommit; inside this scope their commits are
+        suspended and the whole write-set commits at exit — or rolls back
+        together if anything raises (including BaseException, so a
+        simulated or real mid-commit crash leaves nothing behind).
+        """
+        self._suspend_commits = True
+        try:
+            yield
+            self._suspend_commits = False
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        finally:
+            self._suspend_commits = False
 
     def _create_tables(self):
         self.conn.executescript("""
@@ -99,7 +126,7 @@ class SQLiteGraphStore(GraphStore):
                 self.conn.execute(
                     f"ALTER TABLE executions ADD COLUMN {column} {decl}"
                 )
-        self.conn.commit()
+        self._commit()
 
     @staticmethod
     def _decode_execution(row) -> Dict:
@@ -125,7 +152,7 @@ class SQLiteGraphStore(GraphStore):
         except sqlite3.IntegrityError:
             self.conn.rollback()
             return None
-        self.conn.commit()
+        self._commit()
         return session_id
 
     def get_session(self, session_id: str) -> Optional[Dict]:
@@ -143,14 +170,14 @@ class SQLiteGraphStore(GraphStore):
             "UPDATE sessions SET status = 'completed', completed_at = ?, serial_key = NULL WHERE id = ?",
             (time.time(), session_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def fail_session(self, session_id: str):
         self.conn.execute(
             "UPDATE sessions SET status = 'failed', completed_at = ?, serial_key = NULL WHERE id = ?",
             (time.time(), session_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_running_sessions(self) -> List[Dict]:
         rows = self.conn.execute(
@@ -198,7 +225,7 @@ class SQLiteGraphStore(GraphStore):
             (exec_id, session_id, node_name,
              json.dumps(policy) if policy else None, time.time()),
         )
-        self.conn.commit()
+        self._commit()
         return exec_id
 
     def get_execution(self, exec_id: str) -> Optional[Dict]:
@@ -227,7 +254,7 @@ class SQLiteGraphStore(GraphStore):
             "attempts = attempts + 1, started_at = ? WHERE id = ?",
             (json.dumps(input_state), time.time(), exec_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def mark_completed(self, exec_id: str, result_state: Dict[str, Any]):
         self.conn.execute(
@@ -235,7 +262,7 @@ class SQLiteGraphStore(GraphStore):
             "WHERE id = ?",
             (json.dumps(result_state), time.time(), exec_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def mark_retrying(self, exec_id: str, error: str = None, retry_at: float = None):
         self.conn.execute(
@@ -243,7 +270,7 @@ class SQLiteGraphStore(GraphStore):
             "WHERE id = ?",
             (error, retry_at, exec_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def mark_failed(self, exec_id: str, error: str = None):
         self.conn.execute(
@@ -251,7 +278,7 @@ class SQLiteGraphStore(GraphStore):
             "last_error = ?, completed_at = ? WHERE id = ?",
             (json.dumps({"error": error}), error, time.time(), exec_id),
         )
-        self.conn.commit()
+        self._commit()
 
     # ── Edges ─────────────────────────────────────────────────
 
@@ -267,14 +294,14 @@ class SQLiteGraphStore(GraphStore):
             "VALUES (?, ?, ?, ?)",
             (session_id, from_exec_id, to_exec_id, condition),
         )
-        self.conn.commit()
+        self._commit()
 
     def remove_edge(self, from_exec_id: str, to_exec_id: str):
         self.conn.execute(
             "DELETE FROM edges WHERE from_exec_id = ? AND to_exec_id = ?",
             (from_exec_id, to_exec_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_parents(self, exec_id: str) -> List[Dict]:
         rows = self.conn.execute(
@@ -297,6 +324,22 @@ class SQLiteGraphStore(GraphStore):
             "SELECT * FROM edges WHERE session_id = ?", (session_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Transition commit ─────────────────────────────────────
+
+    def commit_transition(
+        self,
+        exec_id: str,
+        session_id: str,
+        result_state: Dict[str, Any],
+        staged=None,
+        children=None,
+    ):
+        """Atomic override: the whole transition is one SQLite transaction."""
+        with self._transaction():
+            super().commit_transition(
+                exec_id, session_id, result_state, staged, children
+            )
 
     def close(self):
         self.conn.close()

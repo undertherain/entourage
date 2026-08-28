@@ -163,11 +163,23 @@ conversation outlives any one incoming-message execution:
   archive; applications select its utility model and retention count.
 
 This is logical conversation continuity over turn-level execution sessions.
-A durable session that waits on a mailbox and resumes for later messages is a
-separate runtime primitive still to be designed. The agreed event model,
+For graph-native waiting, `flow.WaitForMailbox` is a plan leaf that parks
+its execution durably — status `waiting`, holding no worker — and wakes
+when its conversation has claimable events or its timeout fires (delivered
+as a `kind: system` timer event); drained events join the successor's
+state and are acknowledged inside the transition commit.
+`entourage.ingress` routes normalized external results (webhook, broker,
+poller — transport adapters stay outside) into the right conversation:
+back into a parked await, or into a resident agent's inbox. The agreed
+event model,
 safe-point ingestion semantics, and independent conversation/context/graph
 retention policies are recorded in
-[`docs/conversation-mailboxes.md`](docs/conversation-mailboxes.md).
+[`docs/conversation-mailboxes.md`](docs/conversation-mailboxes.md). The
+communication layer above it is Aethera's coordination plane (contract in
+IOA `docs/architecture/components/messaging/coordination-plane.md`);
+Entourage's consumer-side contract — the Transition surface, spawn riding
+the commit, and the four-verb plane adapter — is
+[`docs/coordination-plane.md`](docs/coordination-plane.md).
 
 For multi-agent deployments, `RuntimeBackendConfig` selects one coherent family
 of graph-store, ready-queue, and mailbox strategies. `backend: memory` gives a

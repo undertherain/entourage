@@ -193,8 +193,14 @@ the future waiting-session checkpoint design.
 3. ~~Implement the Redis backend with wake-up, leases, crash recovery, and
    duplicate-event tests.~~ `RedisMailbox` implements the same contract and is
    selected together with Redis graph/queue strategies by `RuntimeBackendConfig`.
-4. Add waiting-session support to the runtime and expose mailbox checkpoints as
-   plans/nodes.
+4. ~~Add waiting-session support to the runtime and expose mailbox
+   checkpoints as plans/nodes.~~ `flow.WaitForMailbox` is a plan leaf that
+   parks its execution durably (status `waiting`, no worker held), wakes on
+   claimable mail or timeout, and acknowledges drained events inside the
+   transition commit. Transport-neutral result ingress landed alongside it
+   (`entourage.ingress`). See
+   [`coordination-plane.md`](coordination-plane.md) for the decided
+   semantics (one journal, ingress-time demux, three timeouts).
 5. Migrate Concierge from turn-level sessions as the first consumer.
 6. Exercise the same contract with the KIP diagnostics bot, including ambient
    Grafana summaries and colleague conversations.

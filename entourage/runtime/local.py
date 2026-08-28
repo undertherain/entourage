@@ -11,6 +11,8 @@ import logging
 import os
 from typing import Any, Dict
 
+from ..mailbox import InMemoryMailbox
+from ..monitors import InMemoryMonitorStore
 from .interfaces import GraphStore
 from .memory import InMemoryGraphStore, InMemoryReadyQueue
 from .planner import Plan
@@ -20,11 +22,22 @@ logger = logging.getLogger(__name__)
 
 
 class Runtime(QueueRuntime):
-    def __init__(self, debug: bool = False, store: GraphStore = None):
+    def __init__(
+        self,
+        debug: bool = False,
+        store: GraphStore = None,
+        mailbox=None,
+        monitors=None,
+    ):
+        # Local runs get the whole coordination family by default: a
+        # mailbox (WaitForMailbox, spawn results) and a monitor store,
+        # both in-memory — nothing to configure for examples and tests.
         super().__init__(
             node_registry={},
             store=store if store is not None else InMemoryGraphStore(),
             queue=InMemoryReadyQueue(),
+            mailbox=mailbox if mailbox is not None else InMemoryMailbox(),
+            monitors=monitors if monitors is not None else InMemoryMonitorStore(),
         )
         self.debug = debug
 

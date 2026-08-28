@@ -170,8 +170,19 @@ as a `kind: system` timer event); drained events join the successor's
 state and are acknowledged inside the transition commit.
 `entourage.ingress` routes normalized external results (webhook, broker,
 poller — transport adapters stay outside) into the right conversation:
-back into a parked await, or into a resident agent's inbox. The agreed
-event model,
+back into a parked await, or into a resident agent's inbox. Child
+sessions spawn atomically on the transition commit
+(`Transition(spawn=[Spawn(...)])`) and report back as correlated mail;
+monitors (`Transition(arm=[Monitor(...)])`) turn silence into
+`kind: system` mail. Runnable walkthroughs, no external services needed:
+
+```bash
+python examples/waiting_session.py     # park, wake on mail, wake on timer
+python examples/remote_tool_ingress.py # remote call joins or falls to inbox
+python examples/spawn_supervisor.py    # fork-join, supervisor loop, monitor lapse
+```
+
+The agreed event model,
 safe-point ingestion semantics, and independent conversation/context/graph
 retention policies are recorded in
 [`docs/conversation-mailboxes.md`](docs/conversation-mailboxes.md). The

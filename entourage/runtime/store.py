@@ -122,6 +122,7 @@ class SQLiteGraphStore(GraphStore):
             ("last_error", "TEXT"),
             ("retry_at", "REAL"),
             ("effects", "TEXT"),
+            ("wake", "TEXT"),
         ):
             if column not in existing:
                 self.conn.execute(
@@ -137,7 +138,7 @@ class SQLiteGraphStore(GraphStore):
     @staticmethod
     def _decode_execution(row) -> Dict:
         d = dict(row)
-        for field in ("input_state", "result_state", "policy", "effects"):
+        for field in ("input_state", "result_state", "policy", "effects", "wake"):
             if d.get(field):
                 d[field] = json.loads(d[field])
         return d
@@ -285,6 +286,28 @@ class SQLiteGraphStore(GraphStore):
             (json.dumps({"error": error}), error, time.time(), exec_id),
         )
         self._commit()
+
+    def mark_waiting(self, exec_id: str, wake: Dict[str, Any]):
+        self.conn.execute(
+            "UPDATE executions SET status = 'waiting', wake = ? WHERE id = ?",
+            (json.dumps(wake), exec_id),
+        )
+        self._commit()
+
+    def wake_execution(self, exec_id: str) -> bool:
+        cursor = self.conn.execute(
+            "UPDATE executions SET status = 'pending' "
+            "WHERE id = ? AND status = 'waiting'",
+            (exec_id,),
+        )
+        self._commit()
+        return cursor.rowcount > 0
+
+    def get_waiting_executions(self) -> List[Dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM executions WHERE status = 'waiting'"
+        ).fetchall()
+        return [self._decode_execution(r) for r in rows]
 
     def set_effects(self, exec_id: str, effects=None):
         self.conn.execute(

@@ -66,6 +66,52 @@ class Node(ControlFlow):
         return f"Node({self.node!r}, {self.policy})"
 
 
+class WaitForMailbox(ControlFlow):
+    """Park the session until mailbox events arrive (or a timeout fires).
+
+    A plan leaf: wherever a node could go, a wait can go. The execution
+    parks durably — status ``waiting``, holding no worker — and wakes when
+    its conversation has claimable events or ``timeout`` seconds elapsed
+    since it first parked. It completes with the drained events merged into
+    state under ``"events"`` (each a mailbox event dict); on timeout the
+    single delivered event is ``{"kind": "system", "source": "timer", ...}``
+    so the successor node re-decides instead of hanging forever.
+
+    Drained events are acknowledged inside the same transition commit that
+    completes the wait — the commit, not the claim lease, is the proof of
+    incorporation.
+
+    - ``conversation``: mailbox conversation to wait on. Default: the
+      ``conversation_id`` key of the input state.
+    - ``timeout``: seconds before waking with a timer event. Default: wait
+      indefinitely (supervision loops should normally set one).
+    - ``limit``: maximum events drained per wake.
+    """
+
+    def __init__(
+        self,
+        conversation: Optional[str] = None,
+        timeout: Optional[float] = None,
+        limit: int = 20,
+    ):
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must be >= 0")
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        self.params = {
+            k: v
+            for k, v in (
+                ("conversation", conversation),
+                ("timeout", timeout),
+                ("limit", limit),
+            )
+            if v is not None
+        }
+
+    def __repr__(self):
+        return f"WaitForMailbox({self.params})"
+
+
 class Conditional(ControlFlow):
     """Gate a sub-plan on a state key being truthy.
 

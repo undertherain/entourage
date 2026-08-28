@@ -125,6 +125,15 @@ class RedisMailbox(Mailbox):
                 break
         return claimed
 
+    def claimable_count(self, conversation_id: str) -> int:
+        now = time.time()
+        count = 0
+        for event_id in self._r.zrange(self._events_key(conversation_id), 0, -1):
+            event = self._load(event_id)
+            if event and self._claimable(event, now):
+                count += 1
+        return count
+
     def claim(
         self,
         conversation_id: str,

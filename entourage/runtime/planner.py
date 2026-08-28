@@ -22,7 +22,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from ..flow import Conditional, Node, Parallel, Sequence, RecursionLimitExceeded
+from ..flow import (
+    Conditional,
+    Node,
+    Parallel,
+    Sequence,
+    WaitForMailbox,
+    RecursionLimitExceeded,
+)
 from .interfaces import GraphStore
 
 # Sentinel node names
@@ -30,8 +37,9 @@ HEAD = "__HEAD__"
 END = "__END__"
 MERGE = "__MERGE__"
 GATE_PREFIX = "__GATE__"
+WAIT = "__WAIT__"
 
-Plan = Union[str, Callable, Node, Sequence, Parallel, Conditional]
+Plan = Union[str, Callable, Node, Sequence, Parallel, Conditional, WaitForMailbox]
 
 
 def resolve_node(item: Union[str, Callable], registry: Dict[str, Callable]) -> str:
@@ -118,6 +126,16 @@ def stage_plan(
             for s in inner_starts:
                 staged.edges.append((gate_id, s, plan.condition))
             return [gate_id], inner_end
+
+        elif isinstance(plan, WaitForMailbox):
+            # Wait parameters travel on the execution's policy, like retry
+            # policy does: stored with the graph, honored by any worker.
+            wait_id = _add_execution(
+                WAIT,
+                exec_id=f"wait-{uuid.uuid4().hex[:8]}",
+                policy={"wait": dict(plan.params)},
+            )
+            return [wait_id], wait_id
 
         elif isinstance(plan, Parallel):
             merge_id = _add_execution(MERGE, exec_id=f"merge-{uuid.uuid4().hex[:8]}")

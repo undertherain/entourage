@@ -60,6 +60,13 @@ class Mailbox(ABC):
         """Return leased events to pending without acknowledging them."""
 
     @abstractmethod
+    def claimable_count(self, conversation_id: str) -> int:
+        """Count events a claim would lease now (pending or lease-expired).
+
+        This is the cheap peek wake decisions rely on: a parked session is
+        woken only when its conversation actually has claimable work."""
+
+    @abstractmethod
     def purge_acknowledged(
         self,
         conversation_id: Optional[str] = None,
@@ -283,6 +290,19 @@ class InMemoryMailbox(Mailbox):
         with self._condition:
             return sum(
                 event["status"] == "pending"
+                for event in self._events.get(conversation_id, [])
+            )
+
+    def claimable_count(self, conversation_id: str) -> int:
+        now = time.time()
+        with self._condition:
+            return sum(
+                event["status"] == "pending"
+                or (
+                    event["status"] == "leased"
+                    and event["lease_until"] is not None
+                    and event["lease_until"] <= now
+                )
                 for event in self._events.get(conversation_id, [])
             )
 

@@ -120,6 +120,7 @@ class InMemoryGraphStore(GraphStore):
             "last_error": None,
             "retry_at": None,
             "effects": None,
+            "wake": None,
             "created_at": time.time(),
             "started_at": None,
             "completed_at": None,
@@ -165,6 +166,25 @@ class InMemoryGraphStore(GraphStore):
         ex["result_state"] = {"error": error}
         ex["last_error"] = error
         ex["completed_at"] = time.time()
+
+    def mark_waiting(self, exec_id: str, wake: Dict[str, Any]):
+        ex = self._executions[exec_id]
+        ex["status"] = "waiting"
+        ex["wake"] = copy.deepcopy(wake)
+
+    def wake_execution(self, exec_id: str) -> bool:
+        ex = self._executions.get(exec_id)
+        if not ex or ex["status"] != "waiting":
+            return False
+        ex["status"] = "pending"
+        return True
+
+    def get_waiting_executions(self) -> List[Dict]:
+        return [
+            copy.deepcopy(ex)
+            for ex in self._executions.values()
+            if ex["status"] == "waiting"
+        ]
 
     def set_effects(self, exec_id: str, effects=None):
         self._executions[exec_id]["effects"] = copy.deepcopy(effects)

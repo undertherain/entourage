@@ -15,14 +15,16 @@ Two seams:
   at-least-once delivery satisfies the contract.
 
 Execution dicts carry at least: ``id``, ``session_id``, ``node_name``,
-``status`` (pending | running | completed | failed), ``input_state``,
+``status`` (pending | running | waiting | completed | failed), ``input_state``,
 ``result_state``, ``attempts`` (times the execution entered running),
 ``policy`` (per-execution retry/timeout policy dict, or None),
 ``last_error`` (message of the most recent failed attempt, or None),
 ``retry_at`` (epoch seconds before which a retrying execution must not
-run, or None) and ``effects`` (a committed transition's not-yet-applied
+run, or None), ``effects`` (a committed transition's not-yet-applied
 mailbox effects — acknowledgements and outbox publications — or None once
-applied; see ``commit_transition``).
+applied; see ``commit_transition``) and ``wake`` (a parked execution's
+durable wake condition — ``conversation`` and optional ``wake_at`` epoch
+deadline — or None; see ``mark_waiting``).
 Parent dicts returned by ``get_parents`` additionally carry the
 ``condition`` of the connecting edge (or None).
 """
@@ -118,6 +120,32 @@ class GraphStore(ABC):
     @abstractmethod
     def mark_failed(self, exec_id: str, error: str = None):
         """Terminal failure: no further attempts will be made."""
+
+    @abstractmethod
+    def mark_waiting(self, exec_id: str, wake: Dict[str, Any]):
+        """Park a pending execution: status ``waiting`` plus a durable wake
+        condition (``conversation``, optional ``wake_at`` epoch deadline).
+
+        A waiting execution is non-terminal — fan-in children stay blocked
+        on it — but never selected by ready detection, so it holds no
+        worker and survives restarts in the graph store. Re-parking after a
+        spurious wake overwrites ``wake`` with the same values (the caller
+        preserves the original ``wake_at`` anchor)."""
+
+    @abstractmethod
+    def wake_execution(self, exec_id: str) -> bool:
+        """Return a waiting execution to pending so delivery can run it.
+
+        Idempotent wake: returns True only when the execution was actually
+        waiting; any other status returns False and changes nothing, so
+        duplicate wake attempts (tick + append racing) enqueue at most one
+        extra delivery — which the pending-only idempotence guard absorbs.
+        The ``wake`` condition is left in place: the re-run reads it to
+        keep the original timeout anchor if it parks again."""
+
+    @abstractmethod
+    def get_waiting_executions(self) -> List[Dict]:
+        """All waiting executions across running sessions (the wake scan)."""
 
     @abstractmethod
     def set_effects(self, exec_id: str, effects: Optional[Dict[str, Any]]):

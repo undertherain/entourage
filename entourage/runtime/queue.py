@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, Optional, Union
 from ..flow import Parallel, Sequence, RecursionLimitExceeded
 from ..transition import normalize_result
 from .interfaces import GraphStore, ReadyQueue
-from .planner import END, GATE_PREFIX, HEAD, MERGE, Plan, expand_plan, stage_plan
+from .planner import END, GATE_PREFIX, HEAD, MERGE, WAIT, Plan, expand_plan, stage_plan
 from .store import DEFAULT_DB_PATH, SQLiteGraphStore
 from .client import TriggerClient
 from .gc import RetentionPolicy, collect_terminal_sessions
@@ -266,6 +266,11 @@ class QueueRuntime:
                 self._enqueue_ready(session_id)
             return
 
+        # Handle WAIT — drain now, or park durably until wake
+        if node_name == WAIT:
+            self._execute_wait(execution, exec_id, session_id)
+            return
+
         # Handle MERGE — just pass through merged state
         if node_name == MERGE:
             merged_state = self.store.collect_input_state(exec_id)
@@ -354,6 +359,130 @@ class QueueRuntime:
                 self.store.mark_failed(exec_id, str(e))
                 self.store.fail_session(session_id)
 
+    # ── Waiting sessions ──────────────────────────────────────
+
+    def _execute_wait(self, execution: Dict, exec_id: str, session_id: str):
+        """Run a ``__WAIT__`` execution: drain, time out, or park.
+
+        The wait is a pure function of (mailbox state, clock), so every
+        path is safe to re-run: a spurious wake re-parks, a crash between
+        claim and commit lets the lease expire and re-claims, and the
+        timeout anchor persists in the execution's ``wake`` condition.
+
+        - Claimable events → complete with them merged into state under
+          ``"events"``; their acknowledgement rides the transition commit.
+        - No events, deadline passed → complete with a single
+          ``kind: system`` timer event, so the successor re-decides.
+        - Otherwise → park: status ``waiting`` plus the wake condition.
+        """
+        input_state = self.store.collect_input_state(exec_id)
+        wait = (execution.get("policy") or {}).get("wait", {})
+        conversation = wait.get("conversation") or input_state.get("conversation_id")
+        if not conversation or self.mailbox is None:
+            reason = (
+                "WaitForMailbox needs a conversation (parameter or "
+                "'conversation_id' in state)"
+                if not conversation
+                else "WaitForMailbox needs a mailbox configured on the runtime"
+            )
+            logger.error("%s (execution %s)", reason, exec_id)
+            self.store.mark_failed(exec_id, reason)
+            self.store.fail_session(session_id)
+            return
+
+        events = self.mailbox.claim(
+            conversation,
+            consumer=f"wait:{exec_id}",
+            limit=wait.get("limit", 20),
+        )
+        if events:
+            effects = {
+                "acknowledge": [{
+                    "conversation_id": conversation,
+                    "event_ids": [e["event_id"] for e in events],
+                }]
+            }
+            result = {**input_state, "events": events}
+            self.store.commit_transition(
+                exec_id, session_id, result, None, None, effects
+            )
+            self._apply_effects_guarded(exec_id, effects)
+            self._enqueue_ready(session_id)
+            return
+
+        # The timeout anchors at the first park and survives re-parking.
+        timeout = wait.get("timeout")
+        previous = execution.get("wake") or {}
+        wake_at = previous.get("wake_at")
+        if wake_at is None and timeout is not None:
+            wake_at = time.time() + timeout
+
+        if wake_at is not None and time.time() >= wake_at:
+            timer_event = {
+                "kind": "system",
+                "source": "timer",
+                "payload": {"timeout": timeout},
+            }
+            result = {**input_state, "events": [timer_event]}
+            self.store.commit_transition(exec_id, session_id, result)
+            self._enqueue_ready(session_id)
+            return
+
+        wake = {"conversation": conversation}
+        if wake_at is not None:
+            wake["wake_at"] = wake_at
+        self.store.mark_waiting(exec_id, wake)
+        logger.debug(
+            "Parked execution %s on conversation %s%s",
+            exec_id, conversation,
+            f" until {wake_at:.0f}" if wake_at else "",
+        )
+
+    def wake_due_waits(self) -> int:
+        """Wake parked executions whose mail arrived or deadline passed.
+
+        The transport-neutral wake baseline: called every engine loop
+        iteration and after applying publications, and callable by ingress
+        adapters after an external append. Waking is idempotent (only a
+        waiting execution flips to pending), so tick and append racing is
+        harmless. Returns the number of executions woken.
+        """
+        woken = 0
+        now = time.time()
+        for ex in self.store.get_waiting_executions():
+            wake = ex.get("wake") or {}
+            due = wake.get("wake_at") is not None and now >= wake["wake_at"]
+            has_mail = (
+                self.mailbox is not None
+                and wake.get("conversation")
+                and self.mailbox.claimable_count(wake["conversation"]) > 0
+            )
+            if not (due or has_mail):
+                continue
+            if self.store.wake_execution(ex["id"]):
+                self._send_to_queue(ex["id"], ex["session_id"])
+                woken += 1
+        return woken
+
+    def waiting_conversations(self) -> set:
+        """Conversations some parked execution is currently waiting on.
+
+        Ingress routing uses this to decide whether a correlated result
+        still has a waiter — a late result whose wait already timed out
+        falls through to the resident inbox instead."""
+        return {
+            (ex.get("wake") or {}).get("conversation")
+            for ex in self.store.get_waiting_executions()
+        } - {None}
+
+    def _next_wake_at(self) -> Optional[float]:
+        deadlines = [
+            (ex.get("wake") or {}).get("wake_at")
+            for ex in self.store.get_waiting_executions()
+        ]
+        deadlines = [d for d in deadlines if d is not None]
+        return min(deadlines) if deadlines else None
+
     # ── Mailbox effects (transactional outbox) ────────────────
 
     def _resolve_mailbox(self, target: str):
@@ -422,6 +551,10 @@ class QueueRuntime:
             event["event_id"] = pub["event_id"]
             self._resolve_mailbox(pub["target"]).append(pub["conversation"], event)
         self.store.set_effects(exec_id, None)
+        if effects.get("publish"):
+            # Fast-path wake: a publication may be the mail a parked
+            # execution waits on. The loop tick remains the catch-all.
+            self.wake_due_waits()
 
     def _apply_effects_guarded(self, exec_id: str, effects: Dict[str, Any]):
         """Apply effects without failing the already-committed node.
@@ -520,8 +653,11 @@ class QueueRuntime:
 
         Also re-enqueues ready nodes of running sessions on startup
         (crash recovery). With stop_when_idle=True the loop exits on the
-        first empty poll — correct for single-process in-memory runs,
-        where an empty queue means no work can ever arrive.
+        first empty poll with no parked executions — correct for
+        single-process in-memory runs, where an empty queue plus nothing
+        waiting means no work can ever arrive. Parked executions keep the
+        loop alive: their timers and externally appended mail are checked
+        at poll cadence by the wake tick.
         """
         logger.info("QueueRuntime starting...")
 
@@ -557,23 +693,38 @@ class QueueRuntime:
             )
             self._apply_effects_guarded(ex["id"], ex["effects"])
 
+        self.wake_due_waits()
+
         while True:
             messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
 
             if not messages:
+                # The wake tick: externally appended mail and expired wait
+                # deadlines have no queue message of their own.
+                if self.wake_due_waits():
+                    continue
                 self.collect_garbage()
                 if stop_when_idle:
-                    logger.info("Queue idle, stopping.")
-                    break
+                    waiting = self.store.get_waiting_executions()
+                    if not waiting:
+                        logger.info("Queue idle, stopping.")
+                        break
+                    # Parked work can still wake (timer, external append) —
+                    # idle means "nothing runnable now", not "nothing ever".
+                    next_at = self._next_wake_at()
+                    if next_at is not None:
+                        time.sleep(max(0.0, min(next_at - time.time(), poll_wait)))
                 continue
 
             self._process_messages(messages)
+            self.wake_due_waits()
             self.collect_garbage()
 
     def run_once(self, poll_wait: float = 1):
         """Process one batch of messages and return. Useful for testing."""
         messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
         self._process_messages(messages)
+        self.wake_due_waits()
         self.collect_garbage()
 
     def collect_garbage(self, force: bool = False) -> list[str]:

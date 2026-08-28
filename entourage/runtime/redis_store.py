@@ -73,6 +73,9 @@ class RedisGraphStore(GraphStore):
     def _outbox_key(self) -> str:
         return f"{self.namespace}:outbox"
 
+    def _waiting_key(self) -> str:
+        return f"{self.namespace}:waiting"
+
     def _parents_key(self, eid: str) -> str:
         return f"{self.namespace}:parents:{eid}"
 
@@ -94,6 +97,7 @@ class RedisGraphStore(GraphStore):
             "policy": json.loads(d["policy"]) if d.get("policy") else None,
             "last_error": d.get("last_error") or None,
             "effects": json.loads(d["effects"]) if d.get("effects") else None,
+            "wake": json.loads(d["wake"]) if d.get("wake") else None,
         }
         for f in _JSON_FIELDS:
             out[f] = json.loads(d[f]) if d.get(f) else None
@@ -199,6 +203,7 @@ class RedisGraphStore(GraphStore):
             pipe.delete(*keys)
         if execution_ids:
             pipe.srem(self._outbox_key(), *execution_ids)
+            pipe.srem(self._waiting_key(), *execution_ids)
         pipe.srem(self._running_key(), session_id)
         pipe.zrem(self._terminal_key(), session_id)
         if session.get("serial_key"):
@@ -304,6 +309,50 @@ class RedisGraphStore(GraphStore):
             "last_error": error or "",
             "completed_at": time.time(),
         })
+
+    def mark_waiting(self, exec_id: str, wake: Dict[str, Any]):
+        session_id = self._r.hget(self._ekey(exec_id), "session_id")
+        pipe = self._r.pipeline()
+        pipe.hset(self._ekey(exec_id), mapping={
+            "status": "waiting",
+            "wake": json.dumps(wake),
+        })
+        if session_id:
+            pipe.srem(self._pending_key(session_id), exec_id)
+        pipe.sadd(self._waiting_key(), exec_id)
+        pipe.execute()
+
+    def wake_execution(self, exec_id: str) -> bool:
+        # Atomic waiting → pending: two wakers racing must produce one
+        # transition, so the status check and flip happen in one script.
+        woken = self._r.eval(
+            """
+            if redis.call('hget', KEYS[1], 'status') ~= 'waiting' then
+                return 0
+            end
+            redis.call('hset', KEYS[1], 'status', 'pending')
+            redis.call('srem', KEYS[2], ARGV[1])
+            local sid = redis.call('hget', KEYS[1], 'session_id')
+            if sid then
+                redis.call('sadd', KEYS[3] .. sid, ARGV[1])
+            end
+            return 1
+            """,
+            3,
+            self._ekey(exec_id),
+            self._waiting_key(),
+            f"{self.namespace}:pending:",
+            exec_id,
+        )
+        return bool(woken)
+
+    def get_waiting_executions(self) -> List[Dict]:
+        ids = self._r.smembers(self._waiting_key()) or set()
+        return [
+            ex
+            for ex in self._get_executions(sorted(ids))
+            if ex["status"] == "waiting"
+        ]
 
     def set_effects(self, exec_id: str, effects=None):
         pipe = self._r.pipeline()

@@ -130,9 +130,12 @@ class IngressRouter:
     ``waiting_conversations`` is the runtime's live view of parked waits
     (``QueueRuntime.waiting_conversations``); ``wake`` is called after a
     successful append so a parked execution becomes runnable without
-    waiting for the engine's next tick (``QueueRuntime.wake_due_waits``).
-    Both are optional: without them the router still delivers, and the
-    engine's poll-cadence tick picks the wake up.
+    waiting for the engine's next tick (``QueueRuntime.wake_due_waits``);
+    ``observe`` feeds armed monitors — a correlated result satisfies a
+    deadline expectation, any event refreshes its source's heartbeat
+    (``QueueRuntime.observe_monitors``). All are optional: without them the
+    router still delivers, and the engine's poll-cadence tick picks the
+    wake up.
     """
 
     def __init__(
@@ -142,12 +145,14 @@ class IngressRouter:
         default_conversation: Optional[str] = None,
         waiting_conversations: Optional[Callable[[], Set[str]]] = None,
         wake: Optional[Callable[[], int]] = None,
+        observe: Optional[Callable[..., int]] = None,
     ):
         self.mailbox = mailbox
         self.routes = routes or InMemoryRouteStore()
         self.default_conversation = default_conversation
         self.waiting_conversations = waiting_conversations
         self.wake = wake
+        self.observe = observe
 
     def register(
         self,
@@ -196,6 +201,8 @@ class IngressRouter:
         if event.created_at is not None:
             envelope["created_at"] = event.created_at
         self.mailbox.append(conversation, envelope)
+        if self.observe is not None:
+            self.observe(correlation_id=event.correlation_id, source=event.source)
         if self.wake is not None:
             self.wake()
         return conversation

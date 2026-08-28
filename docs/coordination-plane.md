@@ -268,11 +268,25 @@ the graph store. `entourage.ingress` provides `InboundEvent`,
 transport hint → default inbox), and route staleness with lazy expiry.
 Tests: `tests/test_waiting.py`, `tests/test_ingress.py`, all three stores.
 
+Monitors landed as `entourage.monitors` (in-memory and Redis backends,
+selected by the runtime resource family): one `Monitor` primitive with the
+two parameterizations — deadline (one-shot, satisfied and removed by a
+matching observation) and heartbeat (sliding window, refreshed by
+observations, one lapse per quiet spell with a `cycles`-distinguished
+idempotency key). Arming is a Transition effect (`arm=[Monitor(...)]`,
+`disarm=[...]`) riding the same commit as the dispatch publication;
+observation happens where events already flow (outbox publication and
+`IngressRouter.accept`); lapse evaluation is lazy in the engine tick and
+delivered as `kind: system`/`source: monitor` mail to the `notify`
+conversation — waking a parked supervisor like any other append. Tests:
+`tests/test_monitors.py`.
+
 Still open on this task: riding detach-route registration on the
 Transition commit (today the dispatching tool registers before the
 transport publishes — idempotent, orphan routes expire); durable
-`RouteStore` and scheduler-tick timers beyond poll cadence; monitors
-(deadline/heartbeat expectations) and the status register; spawn.
+`RouteStore` and scheduler-tick timers beyond poll cadence; the status
+register (heartbeat monitors currently watch event flow, not register
+freshness); spawn.
 
 ### Acceptance vertical
 

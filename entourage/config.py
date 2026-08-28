@@ -61,11 +61,21 @@ class RedisRuntimeConfig:
 
         return RedisMailbox(url=self.url, namespace=self.mailbox_namespace)
 
+    @property
+    def monitors_namespace(self) -> str:
+        return f"{self.prefix}:monitors"
+
+    def monitors(self):
+        from .monitors import RedisMonitorStore
+
+        return RedisMonitorStore(url=self.url, namespace=self.monitors_namespace)
+
     def resources(self) -> "RuntimeResources":
         return RuntimeResources(
             graph_store=self.graph_store(),
             ready_queue=self.ready_queue(),
             mailbox=self.mailbox(),
+            monitors=self.monitors(),
         )
 
 
@@ -76,6 +86,7 @@ class RuntimeResources:
     graph_store: Any
     ready_queue: Any
     mailbox: Any
+    monitors: Any = None
 
 
 @dataclass(frozen=True)
@@ -97,12 +108,14 @@ class RuntimeBackendConfig:
     def resources(self) -> RuntimeResources:
         if self.backend == "memory":
             from .mailbox import InMemoryMailbox
+            from .monitors import InMemoryMonitorStore
             from .runtime import InMemoryGraphStore, InMemoryReadyQueue
 
             return RuntimeResources(
                 graph_store=InMemoryGraphStore(),
                 ready_queue=InMemoryReadyQueue(),
                 mailbox=InMemoryMailbox(),
+                monitors=InMemoryMonitorStore(),
             )
         if self.backend == "redis":
             return RedisRuntimeConfig(url=self.url, prefix=self.prefix).resources()

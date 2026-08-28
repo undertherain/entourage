@@ -15,16 +15,20 @@ Commit and delivery semantics (the transactional-outbox pattern):
 
 - ``state`` and ``plan`` commit atomically with the node's completion
   (``GraphStore.commit_transition``, stage 1).
-- ``acknowledge`` and ``publish`` are *effects*: they are recorded inside
-  the same commit, applied to the mailboxes immediately after it, and
-  cleared once applied. A crash between commit and application is repaired
-  by replay at recovery — acknowledgements use force semantics (the commit,
-  not the lease, is the proof of incorporation) and publications carry
-  idempotency ``event_id``s, so replay is exactly-once-effective.
+- ``acknowledge``, ``publish``, ``arm``, and ``disarm`` are *effects*:
+  they are recorded inside the same commit, applied to the mailboxes and
+  monitor store immediately after it, and cleared once applied. A crash
+  between commit and application is repaired by replay at recovery —
+  acknowledgements use force semantics (the commit, not the lease, is the
+  proof of incorporation), publications carry idempotency ``event_id``s,
+  and monitor arming is arm-if-absent — so replay is
+  exactly-once-effective.
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+from .monitors import Monitor
 
 
 @dataclass(frozen=True)
@@ -63,10 +67,16 @@ class Transition:
     plan: Any = None
     acknowledge: List[Acknowledgement] = field(default_factory=list)
     publish: List[Publication] = field(default_factory=list)
+    # Monitors to arm with this turn's dispatches (the expectation rides
+    # the same commit as the outbound publish, closing the window where a
+    # child dies before anyone expects anything of it) and monitor ids to
+    # disarm (e.g. a supervisor incorporating a child's terminal result).
+    arm: List[Monitor] = field(default_factory=list)
+    disarm: List[str] = field(default_factory=list)
 
     @property
     def has_effects(self) -> bool:
-        return bool(self.acknowledge or self.publish)
+        return bool(self.acknowledge or self.publish or self.arm or self.disarm)
 
 
 def normalize_result(result: Any) -> Transition:

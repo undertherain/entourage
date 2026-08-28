@@ -93,6 +93,7 @@ class QueueRuntime:
         retention_policy: RetentionPolicy = RetentionPolicy(),
         mailbox=None,
         mailbox_resolver: Callable[[str], Any] = None,
+        monitors=None,
     ):
         self.node_registry = node_registry or {}
         self.node_policies: Dict[str, Dict[str, Any]] = {}
@@ -109,16 +110,18 @@ class QueueRuntime:
         self.queue = queue
         self.retention_policy = retention_policy
         self.mailbox = mailbox
+        self.monitors = monitors
         self._last_gc_at = 0.0
 
     @classmethod
     def from_config(cls, config, **kwargs):
-        """Construct graph, queue, and mailbox from one backend profile."""
+        """Construct graph, queue, mailbox, and monitors from one backend profile."""
         resources = config.resources()
         return cls(
             store=resources.graph_store,
             queue=resources.ready_queue,
             mailbox=resources.mailbox,
+            monitors=getattr(resources, "monitors", None),
             **kwargs,
         )
 
@@ -464,6 +467,52 @@ class QueueRuntime:
                 woken += 1
         return woken
 
+    def tick_monitors(self) -> int:
+        """Fire lapsed expectations as ``kind: system`` mail.
+
+        Lazy evaluation at fire time — nothing was cancelled on arrival;
+        satisfied deadline monitors are already gone and refreshed
+        heartbeats are not due. The lapse event id is derived from the
+        monitor id (and heartbeat cycle), so a crash between append and
+        ``mark_lapsed`` replays into the mailbox dedupe, not a duplicate.
+        Returns the number of lapses fired.
+        """
+        if self.monitors is None or self.mailbox is None:
+            return 0
+        fired = 0
+        now = time.time()
+        for record in self.monitors.due(now):
+            event = {
+                "event_id": f"lapse-{record['monitor_id']}-{record.get('cycles', 0)}",
+                "kind": "system",
+                "source": "monitor",
+                "payload": {
+                    key: record[key]
+                    for key in (
+                        "monitor_id", "correlation_id", "source",
+                        "deadline", "interval",
+                    )
+                    if record.get(key) is not None
+                },
+            }
+            event["payload"]["reason"] = (
+                "deadline" if record.get("deadline") is not None else "heartbeat"
+            )
+            self.mailbox.append(record["notify"], event)
+            self.monitors.mark_lapsed(record["monitor_id"], now)
+            logger.warning(
+                "Monitor %s lapsed (%s); notified %s",
+                record["monitor_id"], event["payload"]["reason"], record["notify"],
+            )
+            fired += 1
+        return fired
+
+    def observe_monitors(self, correlation_id: str = None, source: str = None) -> int:
+        """Feed an external observation (ingress adapters call this)."""
+        if self.monitors is None:
+            return 0
+        return self.monitors.observe(correlation_id=correlation_id, source=source)
+
     def waiting_conversations(self) -> set:
         """Conversations some parked execution is currently waiting on.
 
@@ -529,6 +578,25 @@ class QueueRuntime:
                     "event_id": pub.event_id or f"txn-{exec_id}-{index}",
                 })
             effects["publish"] = publications
+        if transition.arm or transition.disarm:
+            if self.monitors is None:
+                raise ValueError(
+                    "transition arms/disarms monitors, but the runtime has "
+                    "no monitor store configured"
+                )
+        if transition.arm:
+            from ..monitors import monitor_to_dict
+
+            armed = []
+            for index, monitor in enumerate(transition.arm):
+                record = monitor_to_dict(monitor)
+                # Deterministic default id: replay after a crash re-arms
+                # the same monitor instead of twinning it.
+                record.setdefault("monitor_id", f"mon-{exec_id}-{index}")
+                armed.append(record)
+            effects["arm"] = armed
+        if transition.disarm:
+            effects["disarm"] = list(transition.disarm)
         return effects
 
     def _apply_effects(self, exec_id: str, effects: Dict[str, Any]):
@@ -550,6 +618,17 @@ class QueueRuntime:
             event = dict(pub["event"])
             event["event_id"] = pub["event_id"]
             self._resolve_mailbox(pub["target"]).append(pub["conversation"], event)
+            # Publications feed monitors: a child's correlated result or
+            # progress event satisfies/refreshes the parent's expectation.
+            if self.monitors is not None:
+                self.monitors.observe(
+                    correlation_id=event.get("correlation_id"),
+                    source=event.get("source"),
+                )
+        for record in effects.get("arm", []):
+            self.monitors.arm(record)
+        for monitor_id in effects.get("disarm", []):
+            self.monitors.disarm(monitor_id)
         self.store.set_effects(exec_id, None)
         if effects.get("publish"):
             # Fast-path wake: a publication may be the mail a parked
@@ -693,15 +772,18 @@ class QueueRuntime:
             )
             self._apply_effects_guarded(ex["id"], ex["effects"])
 
+        self.tick_monitors()
         self.wake_due_waits()
 
         while True:
             messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
 
             if not messages:
-                # The wake tick: externally appended mail and expired wait
-                # deadlines have no queue message of their own.
-                if self.wake_due_waits():
+                # The wake tick: externally appended mail, expired wait
+                # deadlines, and lapsed monitors have no queue message of
+                # their own.
+                lapsed = self.tick_monitors()
+                if self.wake_due_waits() or lapsed:
                     continue
                 self.collect_garbage()
                 if stop_when_idle:
@@ -717,6 +799,7 @@ class QueueRuntime:
                 continue
 
             self._process_messages(messages)
+            self.tick_monitors()
             self.wake_due_waits()
             self.collect_garbage()
 
@@ -724,6 +807,7 @@ class QueueRuntime:
         """Process one batch of messages and return. Useful for testing."""
         messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
         self._process_messages(messages)
+        self.tick_monitors()
         self.wake_due_waits()
         self.collect_garbage()
 

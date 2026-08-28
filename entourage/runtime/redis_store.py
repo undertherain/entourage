@@ -108,9 +108,16 @@ class RedisGraphStore(GraphStore):
     # ── Sessions ──────────────────────────────────────────────
 
     def create_session(
-        self, trigger: str, initial_state: Dict[str, Any], serial_key: str = None
+        self,
+        trigger: str,
+        initial_state: Dict[str, Any],
+        serial_key: str = None,
+        session_id: str = None,
     ) -> Optional[str]:
-        session_id = uuid.uuid4().hex
+        if session_id is None:
+            session_id = uuid.uuid4().hex
+        elif self._r.exists(self._skey(session_id)):
+            return None
         if serial_key is not None:
             created = self._r.eval(
                 """
@@ -428,17 +435,68 @@ class RedisGraphStore(GraphStore):
         staged=None,
         children=None,
         effects=None,
+        spawns=None,
     ):
         """Atomic override: every write of the transition is buffered onto
         one MULTI/EXEC pipeline, so the commit lands entirely or not at all.
 
-        No reads happen inside — ``session_id`` and the pre-read
-        ``children`` come from the caller, and staged execution ids were
-        generated client-side — so the whole write-set queues before a
-        single ``execute()``.
+        Almost no reads happen inside — ``session_id`` and the pre-read
+        ``children`` come from the caller, and staged execution/session ids
+        were generated client-side — so the whole write-set queues before a
+        single ``execute()``. The one read is the spawn existence check,
+        done before the pipeline builds: replayed children are skipped
+        whole (single-worker-per-namespace, like the rest of recovery).
         """
+        spawns = [
+            child
+            for child in (spawns or [])
+            if not self._r.exists(self._skey(child.session_id))
+        ]
         now = time.time()
         pipe = self._r.pipeline(transaction=True)
+        for child in spawns:
+            pipe.hset(self._skey(child.session_id), mapping={
+                "id": child.session_id,
+                "trigger": child.trigger,
+                "status": "running",
+                "initial_state": json.dumps(child.initial_state),
+                "serial_key": "",
+                "created_at": now,
+            })
+            pipe.sadd(self._running_key(), child.session_id)
+            # HEAD is born completed with the initial state; END and the
+            # plan executions start pending.
+            pipe.hset(self._ekey(child.head_id), mapping={
+                "id": child.head_id,
+                "session_id": child.session_id,
+                "node_name": "__HEAD__",
+                "status": "completed",
+                "attempts": 0,
+                "result_state": json.dumps(child.initial_state),
+                "created_at": now,
+                "completed_at": now,
+            })
+            pipe.sadd(self._execs_key(child.session_id), child.head_id)
+            pending = [
+                {"exec_id": child.end_id, "node_name": "__END__", "policy": None}
+            ] + child.executions
+            for ex in pending:
+                mapping = {
+                    "id": ex["exec_id"],
+                    "session_id": child.session_id,
+                    "node_name": ex["node_name"],
+                    "status": "pending",
+                    "attempts": 0,
+                    "created_at": now,
+                }
+                if ex["policy"]:
+                    mapping["policy"] = json.dumps(ex["policy"])
+                pipe.hset(self._ekey(ex["exec_id"]), mapping=mapping)
+                pipe.sadd(self._execs_key(child.session_id), ex["exec_id"])
+                pipe.sadd(self._pending_key(child.session_id), ex["exec_id"])
+            for from_id, to_id, condition in child.edges:
+                pipe.hset(self._children_key(from_id), to_id, condition or "")
+                pipe.hset(self._parents_key(to_id), from_id, condition or "")
         if staged is not None:
             for ex in staged.executions:
                 eid = ex["exec_id"]

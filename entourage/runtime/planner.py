@@ -85,6 +85,7 @@ def stage_plan(
     plan: Plan,
     registry: Dict[str, Callable],
     existing_counts: Optional[Dict[str, int]] = None,
+    id_prefix: Optional[str] = None,
 ) -> StagedPlan:
     """
     Stage a plan into a ``StagedPlan`` without touching any store.
@@ -93,12 +94,19 @@ def stage_plan(
     the session already holds; ``max_invocations`` policies are checked
     against it plus everything staged so far, matching the behavior of the
     former write-as-you-recurse expansion.
+
+    With ``id_prefix`` set, execution ids are ``{id_prefix}-x{n}`` instead
+    of random — staging the same plan twice yields the same ids. Spawned
+    child sessions rely on this: replaying a commit must re-create the
+    identical child graph, not a twin.
     """
     staged = StagedPlan()
     counts: Dict[str, int] = dict(existing_counts or {})
 
     def _add_execution(node_name: str, exec_id: str = None, policy=None) -> str:
-        if exec_id is None:
+        if id_prefix is not None:
+            exec_id = f"{id_prefix}-x{len(staged.executions)}"
+        elif exec_id is None:
             exec_id = uuid.uuid4().hex
         staged.executions.append(
             {"exec_id": exec_id, "node_name": node_name, "policy": policy or None}
@@ -169,6 +177,75 @@ def stage_plan(
 
     staged.starts, staged.end = _stage(plan)
     return staged
+
+
+@dataclass
+class StagedSession:
+    """A child session expanded into concrete records, not yet written.
+
+    Everything ``GraphStore.commit_transition`` needs to create the child
+    atomically with the parent's completion: the session row, its HEAD
+    (pre-completed with the initial state) and END sentinels, the plan's
+    executions, and all edges. Every id is deterministic, so replaying the
+    commit re-creates the identical child instead of twinning it — stores
+    skip a child whose session id already exists.
+    """
+
+    session_id: str
+    trigger: str
+    initial_state: Dict[str, Any]
+    head_id: str
+    end_id: str
+    executions: List[Dict[str, Any]] = field(default_factory=list)
+    edges: List[Tuple[str, str, Optional[str]]] = field(default_factory=list)
+
+
+def stage_spawn(
+    spawn,
+    exec_id: str,
+    index: int,
+    registry: Dict[str, Callable],
+    parent_session_id: Optional[str] = None,
+) -> StagedSession:
+    """Stage one ``transition.Spawn`` into a ``StagedSession``.
+
+    The child's identity derives from the committing execution and the
+    spawn's slot: ``spawn-{exec_id}-{slot}``. Lineage and the child
+    contract's addressing (correlation id, notify conversation) are merged
+    into the child's initial state under the ``"spawn"`` key, so the child
+    — and the engine finishing it — can publish correlated terminal
+    events without any registry lookup.
+    """
+    slot = spawn.slot if spawn.slot is not None else str(index)
+    session_id = f"spawn-{exec_id}-{slot}"
+    correlation_id = spawn.correlation_id or session_id
+    notify = spawn.notify or f"corr:{correlation_id}"
+    initial_state = {
+        **spawn.initial_state,
+        "spawn": {
+            "parent_session_id": parent_session_id,
+            "parent_exec_id": exec_id,
+            "slot": slot,
+            "correlation_id": correlation_id,
+            "notify": notify,
+        },
+    }
+    staged = stage_plan(spawn.plan, registry, id_prefix=session_id)
+    head_id = f"head-{session_id}"
+    end_id = f"end-{session_id}"
+    edges = list(staged.edges)
+    for start in staged.starts:
+        edges.append((head_id, start, None))
+    edges.append((staged.end, end_id, None))
+    return StagedSession(
+        session_id=session_id,
+        trigger=f"spawn:{slot}",
+        initial_state=initial_state,
+        head_id=head_id,
+        end_id=end_id,
+        executions=staged.executions,
+        edges=edges,
+    )
 
 
 def apply_staged(store: GraphStore, session_id: str, staged: StagedPlan):

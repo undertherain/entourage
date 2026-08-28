@@ -146,9 +146,14 @@ class SQLiteGraphStore(GraphStore):
     # ── Sessions ──────────────────────────────────────────────
 
     def create_session(
-        self, trigger: str, initial_state: Dict[str, Any], serial_key: str = None
+        self,
+        trigger: str,
+        initial_state: Dict[str, Any],
+        serial_key: str = None,
+        session_id: str = None,
     ) -> Optional[str]:
-        session_id = uuid.uuid4().hex
+        if session_id is None:
+            session_id = uuid.uuid4().hex
         try:
             self.conn.execute(
                 "INSERT INTO sessions "
@@ -157,7 +162,11 @@ class SQLiteGraphStore(GraphStore):
                 (session_id, trigger, json.dumps(initial_state), serial_key, time.time()),
             )
         except sqlite3.IntegrityError:
-            self.conn.rollback()
+            # Do not roll back inside a transition commit's transaction
+            # scope — the caller pre-checks child existence, so a conflict
+            # here outside that scope is a serial-key or duplicate-id race.
+            if not self._suspend_commits:
+                self.conn.rollback()
             return None
         self._commit()
         return session_id
@@ -377,11 +386,13 @@ class SQLiteGraphStore(GraphStore):
         staged=None,
         children=None,
         effects=None,
+        spawns=None,
     ):
         """Atomic override: the whole transition is one SQLite transaction."""
         with self._transaction():
             super().commit_transition(
-                exec_id, session_id, result_state, staged, children, effects
+                exec_id, session_id, result_state, staged, children, effects,
+                spawns,
             )
 
     def close(self):

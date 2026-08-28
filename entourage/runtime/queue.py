@@ -32,7 +32,10 @@ from typing import Any, Callable, Dict, Optional, Union
 from ..flow import Parallel, Sequence, RecursionLimitExceeded
 from ..transition import normalize_result
 from .interfaces import GraphStore, ReadyQueue
-from .planner import END, GATE_PREFIX, HEAD, MERGE, WAIT, Plan, expand_plan, stage_plan
+from .planner import (
+    END, GATE_PREFIX, HEAD, MERGE, WAIT, Plan,
+    expand_plan, stage_plan, stage_spawn,
+)
 from .store import DEFAULT_DB_PATH, SQLiteGraphStore
 from .client import TriggerClient
 from .gc import RetentionPolicy, collect_terminal_sessions
@@ -248,9 +251,18 @@ class QueueRuntime:
 
         node_name = execution["node_name"]
 
-        # Handle END sentinel
+        # Handle END sentinel. A spawned child's terminal result rides
+        # END's own transition commit through the outbox: the correlated
+        # kind:result publication is recorded with END's completion and
+        # replayed at recovery like any other committed effect.
         if node_name == END:
-            self.store.mark_completed(exec_id, {})
+            final_state = self.store.collect_input_state(exec_id)
+            effects = self._child_result_effects(session_id, final_state)
+            if effects is not None:
+                self.store.commit_transition(exec_id, session_id, {}, None, None, effects)
+                self._apply_effects_guarded(exec_id, effects)
+            else:
+                self.store.mark_completed(exec_id, {})
             self.store.complete_session(session_id)
             logger.info("Session %s completed", session_id)
             return
@@ -258,14 +270,22 @@ class QueueRuntime:
         # Handle GATE — pass through state, conditions on edges do the filtering
         if node_name.startswith(GATE_PREFIX):
             input_state = self.store.collect_input_state(exec_id)
-            self.store.mark_completed(exec_id, input_state)
             condition_key = node_name[len(GATE_PREFIX):]
             if not input_state.get(condition_key):
                 # KNOWN GAP: skipping should resume after the gated sub-plan;
                 # today it ends the whole session (fine for trailing gates).
                 logger.info("Gate condition '%s' not met, skipping branch", condition_key)
+                effects = self._child_result_effects(session_id, input_state)
+                if effects is not None:
+                    self.store.commit_transition(
+                        exec_id, session_id, input_state, None, None, effects
+                    )
+                    self._apply_effects_guarded(exec_id, effects)
+                else:
+                    self.store.mark_completed(exec_id, input_state)
                 self.store.complete_session(session_id)
             else:
+                self.store.mark_completed(exec_id, input_state)
                 self._enqueue_ready(session_id)
             return
 
@@ -285,7 +305,7 @@ class QueueRuntime:
         if node_name not in self.node_registry:
             logger.error("Node '%s' not in registry", node_name)
             self.store.mark_failed(exec_id, f"Unknown node: {node_name}")
-            self.store.fail_session(session_id)
+            self._fail_session(session_id, f"Unknown node: {node_name}")
             return
 
         # Effective policy: per-execution (flow.Node wrapper) overrides the
@@ -327,21 +347,41 @@ class QueueRuntime:
                     transition.plan, self.node_registry, existing_counts=counts
                 )
                 children = self.store.get_children(exec_id)
+            spawns = None
+            if transition.spawn:
+                if self.mailbox is None:
+                    raise ValueError(
+                        "transition spawns child sessions, but the runtime "
+                        "has no mailbox for their terminal events"
+                    )
+                spawns = [
+                    stage_spawn(
+                        sp, exec_id, index, self.node_registry,
+                        parent_session_id=session_id,
+                    )
+                    for index, sp in enumerate(transition.spawn)
+                ]
             effects = self._stage_effects(exec_id, transition)
 
             self.store.commit_transition(
-                exec_id, session_id, transition.state, staged, children, effects
+                exec_id, session_id, transition.state, staged, children, effects,
+                spawns,
             )
 
             if effects is not None:
                 self._apply_effects_guarded(exec_id, effects)
 
+            for child in spawns or []:
+                logger.info(
+                    "Spawned child session %s from %s", child.session_id, exec_id
+                )
+                self._enqueue_ready(child.session_id)
             self._enqueue_ready(session_id)
 
         except RecursionLimitExceeded as e:
             logger.exception("Recursion limit exceeded for node '%s': %s", node_name, e)
             self.store.mark_failed(exec_id, str(e))
-            self.store.fail_session(session_id)
+            self._fail_session(session_id, str(e))
 
         except Exception as e:
             if attempt < max_attempts:
@@ -360,7 +400,79 @@ class QueueRuntime:
                     node_name, attempt, e,
                 )
                 self.store.mark_failed(exec_id, str(e))
-                self.store.fail_session(session_id)
+                self._fail_session(session_id, str(e))
+
+    # ── Spawned children (the plane's child contract, engine-fulfilled) ──
+
+    def _spawn_lineage(self, session_id: str) -> Optional[Dict[str, Any]]:
+        session = self.store.get_session(session_id)
+        if not session:
+            return None
+        lineage = (session.get("initial_state") or {}).get("spawn")
+        return lineage if isinstance(lineage, dict) and lineage.get("notify") else None
+
+    def _child_result_effects(
+        self, session_id: str, final_state: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """The correlated ``kind: result`` publication a finishing child owes.
+
+        Returned as serialized effects so END's completion commits it
+        through the outbox — a crash between commit and delivery replays
+        at recovery. ``None`` for sessions that were not spawned.
+        """
+        lineage = self._spawn_lineage(session_id)
+        if lineage is None or self.mailbox is None:
+            return None
+        return {
+            "publish": [{
+                "target": "self",
+                "conversation": lineage["notify"],
+                "event": {
+                    "kind": "result",
+                    "source": f"session:{session_id}",
+                    "correlation_id": lineage.get("correlation_id"),
+                    "payload": final_state,
+                },
+                "event_id": f"result-{session_id}",
+            }]
+        }
+
+    def _fail_session(self, session_id: str, error: str = None):
+        """Fail a session; a spawned child also emits its death notice.
+
+        The notice is a plain idempotent append (deterministic event id),
+        not an outbox effect — a crash right here can lose it, and that is
+        exactly the gap the armed monitor covers: silence past the
+        deadline lapses into the same notify conversation.
+        """
+        self.store.fail_session(session_id)
+        lineage = self._spawn_lineage(session_id)
+        if lineage is None or self.mailbox is None:
+            return
+        event = {
+            "event_id": f"death-{session_id}",
+            "kind": "system",
+            "source": f"session:{session_id}",
+            "correlation_id": lineage.get("correlation_id"),
+            "payload": {
+                "reason": "failed",
+                "error": error,
+                "slot": lineage.get("slot"),
+            },
+        }
+        try:
+            self.mailbox.append(lineage["notify"], event)
+        except Exception:
+            logger.exception(
+                "Death notice for %s failed to deliver; its monitor lapse "
+                "remains the fallback", session_id,
+            )
+            return
+        if self.monitors is not None:
+            self.monitors.observe(
+                correlation_id=event.get("correlation_id"), source=event["source"]
+            )
+        self.wake_due_waits()
 
     # ── Waiting sessions ──────────────────────────────────────
 
@@ -390,7 +502,7 @@ class QueueRuntime:
             )
             logger.error("%s (execution %s)", reason, exec_id)
             self.store.mark_failed(exec_id, reason)
-            self.store.fail_session(session_id)
+            self._fail_session(session_id, reason)
             return
 
         events = self.mailbox.claim(

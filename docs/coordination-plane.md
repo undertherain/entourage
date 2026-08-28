@@ -77,6 +77,21 @@ child results, death notices, and progress as ordinary drained events; a
 blocking join is `WaitForMailbox` filtered on the spawn's correlation, and
 recovery of the wait comes free from the graph store.
 
+Implemented 2026-08-28: `Transition(spawn=[Spawn(plan, initial_state,
+slot, correlation_id, notify)])` — the child session is staged
+client-side (deterministic ids: `spawn-{exec_id}-{slot}` and onward) and
+written inside `commit_transition` on all three stores; a child whose
+session id already exists is skipped whole, so replay re-spawns
+idempotently. Lineage rides the child's initial state under `"spawn"`.
+The engine fulfils the child contract mechanically: a completing child's
+correlated `kind: result` publication rides END's own transition commit
+through the outbox (crash-safe replay); a failing child emits a
+`kind: system` death notice as an idempotent append — and if that append
+is lost in a crash, the armed monitor's lapse is the designed fallback.
+Both observations feed monitors and wake parked parents. Fork-join is
+`spawn` + a returned plan parking on `corr:{correlation_id}`; supervision
+is `notify="<inbox>"` + a broad wait. Tests: `tests/test_spawn.py`.
+
 ## The four-verb adapter
 
 What Entourage requires of any plane binding (in-memory and Redis today,
@@ -281,12 +296,17 @@ delivered as `kind: system`/`source: monitor` mail to the `notify`
 conversation — waking a parked supervisor like any other append. Tests:
 `tests/test_monitors.py`.
 
+Spawn landed too — see "Spawn rides the commit" above for what was
+implemented against the design.
+
 Still open on this task: riding detach-route registration on the
 Transition commit (today the dispatching tool registers before the
 transport publishes — idempotent, orphan routes expire); durable
 `RouteStore` and scheduler-tick timers beyond poll cadence; the status
 register (heartbeat monitors currently watch event flow, not register
-freshness); spawn.
+freshness); supervision *retry* policy (re-spawning a dead child is a
+parent decision at a safe point, not engine magic — needs a worked
+example once Concierge migrates).
 
 ### Acceptance vertical
 

@@ -26,14 +26,21 @@ class InMemoryGraphStore(GraphStore):
     # ── Sessions ──────────────────────────────────────────────
 
     def create_session(
-        self, trigger: str, initial_state: Dict[str, Any], serial_key: str = None
+        self,
+        trigger: str,
+        initial_state: Dict[str, Any],
+        serial_key: str = None,
+        session_id: str = None,
     ) -> Optional[str]:
         if serial_key is not None and any(
             s.get("serial_key") == serial_key and s["status"] == "running"
             for s in self._sessions.values()
         ):
             return None
-        session_id = uuid.uuid4().hex
+        if session_id is None:
+            session_id = uuid.uuid4().hex
+        elif session_id in self._sessions:
+            return None
         self._sessions[session_id] = {
             "id": session_id,
             "trigger": trigger,

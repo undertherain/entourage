@@ -40,11 +40,18 @@ class GraphStore(ABC):
 
     @abstractmethod
     def create_session(
-        self, trigger: str, initial_state: Dict[str, Any], serial_key: str = None
+        self,
+        trigger: str,
+        initial_state: Dict[str, Any],
+        serial_key: str = None,
+        session_id: str = None,
     ) -> Optional[str]:
         """Atomically create a running session and claim ``serial_key``.
 
         Return ``None`` when another running session owns the key.
+        An explicit ``session_id`` supports deterministic child identity
+        (spawn replay); creation of an id that already exists must return
+        ``None`` rather than clobber.
         """
 
     @abstractmethod
@@ -292,6 +299,7 @@ class GraphStore(ABC):
         staged=None,
         children: List[Tuple[str, Optional[str]]] = None,
         effects: Dict[str, Any] = None,
+        spawns: List[Any] = None,
     ):
         """Commit a node's returned transition as one unit.
 
@@ -306,7 +314,12 @@ class GraphStore(ABC):
         ``staged`` is a ``StagedPlan`` (or ``None`` for a plain completion);
         ``children`` is the node's pre-read outgoing edge list from
         ``get_children``, passed in so atomic overrides need no reads inside
-        their transaction scope. ``effects`` is the transition's serialized
+        their transaction scope. ``spawns`` is a list of ``StagedSession``
+        child sessions to create with this commit — spawn is an
+        authoritative lifecycle act, exactly-once via the commit; every id
+        in a staged session is deterministic, and a child whose session id
+        already exists is skipped whole, so replay re-spawns idempotently
+        instead of twinning. ``effects`` is the transition's serialized
         mailbox effects (acknowledgements and outbox publications): the
         graph-store commit is the linearization point, so effects are
         recorded here and applied to the mailboxes afterwards, idempotently,
@@ -339,6 +352,29 @@ class GraphStore(ABC):
                 self.add_edge(session_id, exec_id, start_id)
             for child_id, condition in children or []:
                 self.add_edge(session_id, staged.end, child_id, condition)
+        for child in spawns or []:
+            if self.get_session(child.session_id) is not None:
+                continue  # replay: this child was already spawned
+            self.create_session(
+                child.trigger,
+                child.initial_state,
+                session_id=child.session_id,
+            )
+            self.add_execution(
+                child.session_id, "__HEAD__", exec_id=child.head_id
+            )
+            self.add_execution(child.session_id, "__END__", exec_id=child.end_id)
+            for ex in child.executions:
+                self.add_execution(
+                    child.session_id,
+                    ex["node_name"],
+                    exec_id=ex["exec_id"],
+                    policy=ex["policy"],
+                )
+            for from_id, to_id, condition in child.edges:
+                self.add_edge(child.session_id, from_id, to_id, condition)
+            # HEAD is a sentinel: born completed, carrying the initial state.
+            self.mark_completed(child.head_id, child.initial_state)
         if effects is not None:
             self.set_effects(exec_id, effects)
         self.mark_completed(exec_id, result_state)

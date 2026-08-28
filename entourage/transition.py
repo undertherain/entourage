@@ -59,6 +59,42 @@ class Publication:
     event_id: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class Spawn:
+    """A child session to create atomically with this transition.
+
+    Spawn is an authoritative lifecycle act, exactly-once via the commit:
+    the child's session id derives deterministically from the committing
+    execution and ``slot``, so crash replay re-spawns idempotently instead
+    of twinning the child. Lineage (parent session/execution, slot,
+    correlation, notify address) is injected into the child's initial
+    state under the ``"spawn"`` key.
+
+    The engine fulfils the plane's child contract mechanically: when the
+    child session completes, its final state is published as a correlated
+    ``kind: result`` event to ``notify``; when it fails, a ``kind: system``
+    death notice goes there instead. Both carry the ``correlation_id`` so
+    armed monitors observe them, and both wake a parked parent.
+
+    - ``plan``: what the child runs (any plan form).
+    - ``initial_state``: the child's starting state (lineage is merged in).
+    - ``slot``: disambiguates multiple spawns in one transition; defaults
+      to the list index.
+    - ``correlation_id``: defaults to the child session id. A parent that
+      wants to block-join chooses its own and parks on
+      ``corr:{correlation_id}`` (the derived await conversation).
+    - ``notify``: conversation for the child's terminal events; defaults
+      to ``corr:{correlation_id}`` (narrow join). A supervisor sets its
+      own inbox conversation instead.
+    """
+
+    plan: Any
+    initial_state: Dict[str, Any] = field(default_factory=dict)
+    slot: Optional[str] = None
+    correlation_id: Optional[str] = None
+    notify: Optional[str] = None
+
+
 @dataclass
 class Transition:
     """Everything a node proposes for one turn; the runtime commits it."""
@@ -73,6 +109,10 @@ class Transition:
     # disarm (e.g. a supervisor incorporating a child's terminal result).
     arm: List[Monitor] = field(default_factory=list)
     disarm: List[str] = field(default_factory=list)
+    # Child sessions to create with this commit. Not an outbox effect —
+    # the child graph is written structurally inside the same commit that
+    # completes this node, like a returned plan is.
+    spawn: List[Spawn] = field(default_factory=list)
 
     @property
     def has_effects(self) -> bool:

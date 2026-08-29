@@ -129,6 +129,7 @@ class ConversationConfig:
     topic_shift_detection: bool = True
     reset_command: str = "/new"
     recent_summary_limit: int = 3
+    topic_carry_messages: int = 10
 
 
 @dataclass(frozen=True)
@@ -232,5 +233,6 @@ def load_agent_manifest(path: Path, environ: Mapping[str, str] = os.environ) -> 
             topic_shift_detection=bool(conversation.get("topic_shift_detection", True)),
             reset_command=str(conversation.get("reset_command", "/new")),
             recent_summary_limit=int(conversation.get("recent_summary_limit", 3)),
+            topic_carry_messages=int(conversation.get("topic_carry_messages", 10)),
         ),
     )

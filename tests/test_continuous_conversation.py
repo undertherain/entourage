@@ -54,10 +54,33 @@ def test_event_history_rotates_old_events_to_append_only_archive(tmp_path):
     assert [event["event_id"] for event in archived] == ["0"]
 
 
-def test_topic_shift_archives_segment_and_clears_history(tmp_path):
+def test_topic_shift_archives_segment_and_keeps_dialogue_tail(tmp_path):
+    segment = [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call_1"}]},
+        {"role": "tool", "content": "raw tool output"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    chat = history(tmp_path, segment)
+    topics = Topics(shifts=True)
+    conversation = ContinuousConversation(
+        chat, topics, ConversationPolicy(topic_carry_messages=2)
+    )
+
+    assert conversation.begin_turn("new topic") is True
+    assert topics.archived == [segment]
+    assert chat.get_messages() == [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+
+
+def test_topic_shift_with_zero_carry_clears_history(tmp_path):
     chat = history(tmp_path, [{"role": "user", "content": "old topic"}])
     topics = Topics(shifts=True)
-    conversation = ContinuousConversation(chat, topics)
+    conversation = ContinuousConversation(
+        chat, topics, ConversationPolicy(topic_carry_messages=0)
+    )
 
     assert conversation.begin_turn("new topic") is True
     assert topics.archived == [[{"role": "user", "content": "old topic"}]]

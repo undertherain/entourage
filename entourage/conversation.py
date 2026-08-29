@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .agent import PersistableAgent
-from .memory import ChatHistory, TopicMemory
+from .memory import ChatHistory, TopicMemory, dialogue_tail
 from .runtime import Runtime
 
 
@@ -14,6 +14,10 @@ class ConversationPolicy:
 
     detect_topic_shifts: bool = True
     reset_command: Optional[str] = "/new"
+    # Dialogue messages carried into the next segment on a detected topic
+    # shift, so a follow-up the judge misreads as a new topic keeps its
+    # immediate context. The explicit reset command always clears everything.
+    topic_carry_messages: int = 10
 
 
 class ContinuousConversation:
@@ -53,7 +57,11 @@ class ContinuousConversation:
         if not self.policy.detect_topic_shifts:
             return False
         if self.topics.is_new_topic(segment + [{"role": "user", "content": incoming}]):
-            self.reset()
+            if segment:
+                self.topics.archive(segment)
+            self.history.set_messages(
+                dialogue_tail(segment, self.policy.topic_carry_messages)
+            )
             return True
         return False
 

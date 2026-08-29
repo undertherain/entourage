@@ -55,9 +55,11 @@ class ConfiguredAgent:
             ConversationPolicy(
                 detect_topic_shifts=manifest.conversation.topic_shift_detection,
                 reset_command=manifest.conversation.reset_command,
+                topic_carry_messages=manifest.conversation.topic_carry_messages,
             ),
         )
         self._manifest = manifest
+        self._topics = topics
         self._context = context
         self._loop = ContinuousAgent(
             manifest.model,
@@ -69,7 +71,19 @@ class ConfiguredAgent:
         )
 
     def system_prompt(self) -> str:
-        return self._manifest.prompt.read_text(encoding="utf-8")
+        base = self._manifest.prompt.read_text(encoding="utf-8")
+        summaries = self._topics.recent_summaries()
+        if not summaries:
+            return base
+        numbered = "\n\n".join(
+            f"{index}. {summary.strip()}"
+            for index, summary in enumerate(reversed(summaries), start=1)
+        )
+        return (
+            base
+            + "\n\n# Earlier topics in this conversation (summaries, oldest first)\n\n"
+            + numbered
+        )
 
     def handle(self, text: str) -> str:
         return self._loop.handle(text)

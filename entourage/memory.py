@@ -35,6 +35,17 @@ def _dialogue_only(messages: list[dict]) -> list[dict]:
     ]
 
 
+def dialogue_tail(messages: list[dict], limit: int) -> list[dict]:
+    """Last ``limit`` dialogue messages, valid as a standalone transcript.
+
+    Tool traffic is dropped: a tool result or a tool_calls stub cannot open a
+    transcript, and the assistant's answers already restate what tools said.
+    """
+    if limit <= 0:
+        return []
+    return _dialogue_only(messages)[-limit:]
+
+
 def conversation_storage_key(conversation_id: str) -> str:
     """Encode an external conversation id as one safe, readable path segment."""
     return quote(str(conversation_id), safe="-_.:")

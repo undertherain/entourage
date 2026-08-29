@@ -49,6 +49,7 @@ agent:
     topic_shift_detection: false
     reset_command: /clear
     recent_summary_limit: 2
+    topic_carry_messages: 4
 """,
         encoding="utf-8",
     )
@@ -68,6 +69,7 @@ def test_manifest_is_portable_and_resolves_whole_environment_values(tmp_path):
     assert manifest.model == "test/model"
     assert manifest.conversation.topic_shift_detection is False
     assert manifest.conversation.reset_command == "/clear"
+    assert manifest.conversation.topic_carry_messages == 4
 
 
 def test_manifest_selects_one_runtime_backend_family(tmp_path):
@@ -129,6 +131,34 @@ def test_worker_keeps_conversations_separate_and_publishes(tmp_path):
     assert published == [first]
     assert set(runtime.nodes) == {"kip.handle_event", "kip.publish_reply"}
     assert set(runtime.pipelines) == {"kip.message"}
+
+
+def test_configured_agent_injects_recent_topic_summaries_oldest_first(tmp_path):
+    import os
+
+    from entourage.deployment import ConfiguredAgent
+
+    path = write_manifest(tmp_path)
+    (tmp_path / "persona.md").write_text("persona", encoding="utf-8")
+    manifest = load_agent_manifest(
+        path, {"TEST_REDIS_URL": "redis://example/2", "TEST_MODEL": "model"}
+    )
+    agent = ConfiguredAgent(manifest, "conv")
+
+    assert agent.system_prompt() == "persona"
+
+    archive = manifest.topic_archive_dir / "conv"
+    old = archive / "summary_old.txt"
+    new = archive / "summary_new.txt"
+    old.write_text("first discussion", encoding="utf-8")
+    new.write_text("second discussion", encoding="utf-8")
+    os.utime(old, (1_000, 1_000))
+    os.utime(new, (2_000, 2_000))
+
+    prompt = agent.system_prompt()
+
+    assert prompt.startswith("persona\n\n# Earlier topics")
+    assert prompt.index("1. first discussion") < prompt.index("2. second discussion")
 
 
 def test_import_object_rejects_ambiguous_reference():

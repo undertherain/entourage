@@ -255,3 +255,26 @@ def test_worker_timer_only_batch_makes_no_agent_turn(actor_app):
     assert FakeAgent.handled == []
     worker.publish_replies(state)
     assert published == []
+
+
+def test_worker_can_accept_typed_application_events(tmp_path):
+    FakeAgent.created = []
+    FakeAgent.handled = []
+    manifest = load_agent_manifest(write_manifest(tmp_path))
+    mailbox = InMemoryMailbox()
+    runtime = QueueRuntime(
+        store=InMemoryGraphStore(), queue=InMemoryReadyQueue(), mailbox=mailbox
+    )
+    worker = MailboxAgentWorker(
+        manifest,
+        runtime,
+        agent_factory=FakeAgent,
+        conversation_prefix="chat:",
+        event_kinds={"user", "alert", "diagnostic_result"},
+    )
+
+    assert worker.turn_texts("chat:9", [
+        {"kind": "alert", "content": "firing"},
+        {"kind": "system", "content": "timer"},
+        {"kind": "diagnostic_result", "content": "evidence"},
+    ]) == ["firing", "evidence"]

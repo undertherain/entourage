@@ -180,6 +180,7 @@ class MailboxAgentWorker:
         agent_factory: Callable[..., Any] = ConfiguredAgent,
         formatter: Optional[Callable[[str, List[dict]], Optional[str]]] = None,
         conversation_prefix: Optional[str] = None,
+        event_kinds: Optional[set[str]] = None,
         batch_limit: int = 10,
         rotate_after: int = 200,
         debug: bool = False,
@@ -193,6 +194,9 @@ class MailboxAgentWorker:
         self.publisher = publisher
         self.agent_factory = agent_factory
         self.formatter = formatter
+        self.event_kinds = frozenset(event_kinds or {"user"})
+        if not self.event_kinds:
+            raise ValueError("event_kinds must not be empty")
         self.batch_limit = batch_limit
         self.rotate_after = rotate_after
         self.debug = debug
@@ -249,9 +253,19 @@ class MailboxAgentWorker:
                 group.clear()
 
         for event in events:
-            if event.get("kind") != "user":
+            if event.get("kind") not in self.event_kinds:
                 continue
-            if reset and str(event.get("content", "")).strip() == reset:
+            if event.get("kind") != "user":
+                # Application events are causal boundaries, not chat bursts:
+                # an alert and its already-finished result must still become
+                # two ordered turns (acknowledgement, then conclusion).
+                flush()
+                text = self._format(conversation_id, [event])
+                if text:
+                    texts.append(text)
+                continue
+            if (event.get("kind") == "user" and reset
+                    and str(event.get("content", "")).strip() == reset):
                 flush()
                 texts.append(reset)
             else:

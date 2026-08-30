@@ -203,7 +203,13 @@ the future waiting-session checkpoint design.
    semantics (one journal, ingress-time demux, three timeouts).
 5. Migrate Concierge from turn-level sessions as the first consumer.
 6. Exercise the same contract with the KIP diagnostics bot, including ambient
-   Grafana summaries and colleague conversations.
+   Grafana summaries and colleague conversations. Telegram turns migrated
+   2026-08-30: `deployment.MailboxAgentWorker` runs a per-conversation actor
+   session (`WaitForMailbox → handle_turn → publish_replies → re-park`,
+   rotated before the session node limit), created and revived lazily by
+   `QueueRuntime.register_actor`/`ensure_actors` whenever a registered
+   conversation has claimable mail. Ambient Grafana events still enter via
+   the bot's own alert store, not the mailbox — that half remains open.
 7. ~~Add terminal execution retention metadata and incremental graph GC.~~
    Terminal graphs are now collected incrementally; active-session prefix
    compaction remains a later checkpoint feature.

@@ -67,6 +67,15 @@ class Mailbox(ABC):
         woken only when its conversation actually has claimable work."""
 
     @abstractmethod
+    def claimable_conversations(self) -> List[str]:
+        """Conversations holding at least one claimable event right now.
+
+        The peek actor supervision relies on: the runtime ensures a resident
+        session exists for every listed conversation it has an actor
+        registered for, so mail appended after that conversation's session
+        ended (rotation, failure, restart) still gets a consumer."""
+
+    @abstractmethod
     def purge_acknowledged(
         self,
         conversation_id: Optional[str] = None,
@@ -305,6 +314,23 @@ class InMemoryMailbox(Mailbox):
                 )
                 for event in self._events.get(conversation_id, [])
             )
+
+    def claimable_conversations(self) -> List[str]:
+        now = time.time()
+        with self._condition:
+            return [
+                conversation_id
+                for conversation_id, events in self._events.items()
+                if any(
+                    event["status"] == "pending"
+                    or (
+                        event["status"] == "leased"
+                        and event["lease_until"] is not None
+                        and event["lease_until"] <= now
+                    )
+                    for event in events
+                )
+            ]
 
     def _has_claimable(self, conversation_id: Optional[str]) -> bool:
         now = time.time()

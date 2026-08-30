@@ -31,6 +31,22 @@ def test_mailbox_backend_claim_any_does_not_mix_conversations(mailbox_backend):
     assert {event["conversation_id"] for event in events} == {"first"}
 
 
+def test_mailbox_backend_lists_claimable_conversations(mailbox_backend):
+    mailbox = mailbox_backend
+    assert mailbox.claimable_conversations() == []
+    mailbox.append("a", {"event_id": "one"})
+    mailbox.append("b", {"event_id": "two"})
+    assert set(mailbox.claimable_conversations()) == {"a", "b"}
+
+    events = mailbox.claim("a", "worker")
+    assert set(mailbox.claimable_conversations()) == {"b"}  # leased is not claimable
+    mailbox.acknowledge("a", "worker", [event["event_id"] for event in events])
+    assert set(mailbox.claimable_conversations()) == {"b"}
+
+    mailbox.claim("b", "crashed", lease_seconds=0)  # expired lease is claimable again
+    assert set(mailbox.claimable_conversations()) == {"b"}
+
+
 def test_mailbox_backend_recovers_expired_lease(mailbox_backend):
     mailbox = mailbox_backend
     mailbox.append("chat", {"event_id": "recover"})

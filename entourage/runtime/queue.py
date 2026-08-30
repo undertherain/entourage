@@ -101,6 +101,7 @@ class QueueRuntime:
         self.node_registry = node_registry or {}
         self.node_policies: Dict[str, Dict[str, Any]] = {}
         self.pipelines: Dict[str, PipelineTemplate] = {}
+        self.actors: Dict[str, Callable[[str], Any]] = {}
         # Maps opaque publication targets to Mailbox instances. Addresses
         # stay stable names behind this injectable seam — never hostnames
         # or backend details. Default: only "self" resolves, to `mailbox`.
@@ -165,6 +166,61 @@ class QueueRuntime:
         (Sequence, Parallel, or a single node name string).
         """
         self.pipelines[trigger_name] = template
+
+    def register_actor(self, prefix: str, template: Callable[[str], Any]):
+        """Keep a resident session alive for conversations under ``prefix``.
+
+        An actor is a per-conversation session (typically a
+        ``WaitForMailbox → handle → re-park`` loop) created lazily: whenever
+        the engine sees claimable mail in a conversation matching ``prefix``
+        and no live session holds that conversation as its ``serial_key``,
+        it starts one from ``template(conversation_id)`` with
+        ``{"conversation_id": ...}`` as initial state. Transports therefore
+        only append to the mailbox; consumer lifecycle — first message ever,
+        respawn after a rotation ended the previous session, recovery after
+        a failed or lost one — is the engine's job. The ``serial_key``
+        uniqueness check makes ensuring idempotent: one live actor per
+        conversation, ever.
+        """
+        if not prefix:
+            raise ValueError("actor prefix must be non-empty")
+        self.actors[prefix] = template
+
+    def ensure_actors(self) -> int:
+        """Start actor sessions for matching conversations with claimable mail.
+
+        Runs on the engine thread at the same cadence as ``wake_due_waits``;
+        returns the number of sessions started. Safe to call repeatedly — a
+        conversation whose actor is alive (running or parked) is skipped via
+        the serial-key check inside ``start_session``.
+        """
+        if self.mailbox is None or not self.actors:
+            return 0
+        started = 0
+        for conversation in self.mailbox.claimable_conversations():
+            template = next(
+                (
+                    tpl
+                    for prefix, tpl in self.actors.items()
+                    if conversation.startswith(prefix)
+                ),
+                None,
+            )
+            if template is None:
+                continue
+            session_id = self.start_session(
+                f"actor:{conversation}",
+                {"conversation_id": conversation},
+                plan=template(conversation),
+                serial_key=conversation,
+            )
+            if session_id is not None:
+                started += 1
+                logger.info(
+                    "Started actor session %s for conversation %s",
+                    session_id, conversation,
+                )
+        return started
 
     # ── Session creation ──────────────────────────────────────
 
@@ -744,7 +800,9 @@ class QueueRuntime:
         self.store.set_effects(exec_id, None)
         if effects.get("publish"):
             # Fast-path wake: a publication may be the mail a parked
-            # execution waits on. The loop tick remains the catch-all.
+            # execution waits on — or mail for a conversation whose actor
+            # rotated away. The loop tick remains the catch-all.
+            self.ensure_actors()
             self.wake_due_waits()
 
     def _apply_effects_guarded(self, exec_id: str, effects: Dict[str, Any]):
@@ -885,6 +943,7 @@ class QueueRuntime:
             self._apply_effects_guarded(ex["id"], ex["effects"])
 
         self.tick_monitors()
+        self.ensure_actors()
         self.wake_due_waits()
 
         while True:
@@ -895,7 +954,8 @@ class QueueRuntime:
                 # deadlines, and lapsed monitors have no queue message of
                 # their own.
                 lapsed = self.tick_monitors()
-                if self.wake_due_waits() or lapsed:
+                started = self.ensure_actors()
+                if self.wake_due_waits() or started or lapsed:
                     continue
                 self.collect_garbage()
                 if stop_when_idle:
@@ -912,6 +972,7 @@ class QueueRuntime:
 
             self._process_messages(messages)
             self.tick_monitors()
+            self.ensure_actors()
             self.wake_due_waits()
             self.collect_garbage()
 
@@ -920,6 +981,7 @@ class QueueRuntime:
         messages = self.queue.receive(max_messages=10, wait_seconds=poll_wait)
         self._process_messages(messages)
         self.tick_monitors()
+        self.ensure_actors()
         self.wake_due_waits()
         self.collect_garbage()
 

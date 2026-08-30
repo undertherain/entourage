@@ -134,6 +134,17 @@ class RedisMailbox(Mailbox):
                 count += 1
         return count
 
+    def claimable_conversations(self) -> List[str]:
+        now = time.time()
+        result = []
+        for conversation_id in sorted(self._r.smembers(self._conversations_key()) or set()):
+            for event_id in self._r.zrange(self._events_key(conversation_id), 0, -1):
+                event = self._load(event_id)
+                if event and self._claimable(event, now):
+                    result.append(conversation_id)
+                    break
+        return result
+
     def claim(
         self,
         conversation_id: str,

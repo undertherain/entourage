@@ -133,9 +133,7 @@ def test_worker_keeps_conversations_separate_and_publishes(tmp_path):
     assert set(runtime.pipelines) == {"kip.message"}
 
 
-def test_configured_agent_injects_recent_topic_summaries_oldest_first(tmp_path):
-    import os
-
+def test_configured_agent_does_not_impose_topic_policy(tmp_path):
     from entourage.deployment import ConfiguredAgent
 
     path = write_manifest(tmp_path)
@@ -147,18 +145,8 @@ def test_configured_agent_injects_recent_topic_summaries_oldest_first(tmp_path):
 
     assert agent.system_prompt() == "persona"
 
-    archive = manifest.topic_archive_dir / "conv"
-    old = archive / "summary_old.txt"
-    new = archive / "summary_new.txt"
-    old.write_text("first discussion", encoding="utf-8")
-    new.write_text("second discussion", encoding="utf-8")
-    os.utime(old, (1_000, 1_000))
-    os.utime(new, (2_000, 2_000))
-
-    prompt = agent.system_prompt()
-
-    assert prompt.startswith("persona\n\n# Earlier topics")
-    assert prompt.index("1. first discussion") < prompt.index("2. second discussion")
+    assert agent._loop.conversation.policy.detect_topic_shifts is False
+    assert agent._loop.conversation.policy.reset_command == "/clear"
 
 
 def test_import_object_rejects_ambiguous_reference():

@@ -4,10 +4,11 @@ import importlib
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
+from .capabilities import CapabilityRegistry, Turn
 from .config import AgentManifest, load_agent_manifest
 from .conversation import ContinuousAgent, ContinuousConversation, ConversationPolicy
 from .flow import Sequence, WaitForMailbox
-from .memory import ChatHistory, TopicMemory, conversation_storage_key
+from .memory import ChatHistory
 from .runtime import QueueRuntime
 
 
@@ -41,49 +42,58 @@ class ConfiguredAgent:
         conversation_id: str,
         context: Any = None,
         debug: bool = False,
+        capabilities: Optional[List[Any]] = None,
     ):
         manifest.chat_dir.mkdir(parents=True, exist_ok=True)
         history = ChatHistory(conversation_id, manifest.chat_dir)
-        topics = TopicMemory(
-            manifest.topic_archive_dir / conversation_storage_key(conversation_id),
-            manifest.utility_model,
-            manifest.conversation.recent_summary_limit,
-        )
         conversation = ContinuousConversation(
             history,
-            topics,
+            None,
             ConversationPolicy(
-                detect_topic_shifts=manifest.conversation.topic_shift_detection,
+                # Semantic routing belongs to the application. Generic configured
+                # workers retain explicit reset support only.
+                detect_topic_shifts=False,
                 reset_command=manifest.conversation.reset_command,
                 topic_carry_messages=manifest.conversation.topic_carry_messages,
             ),
         )
         self._manifest = manifest
-        self._topics = topics
+        self._conversation = conversation
         self._context = context
+        self.capabilities = CapabilityRegistry(
+            self.default_capabilities() if capabilities is None else capabilities
+        )
         self._loop = ContinuousAgent(
             manifest.model,
-            load_tools(manifest, context),
+            [*load_tools(manifest, context), *self.capabilities.tools()],
             conversation,
             self.system_prompt,
             debug=debug,
             model_params=dict(manifest.model_params),
+            capabilities=self.capabilities,
         )
 
-    def system_prompt(self) -> str:
+    def default_capabilities(self) -> List[Any]:
+        """Capabilities composed when the caller names none.
+
+        Empty by design: a configured agent is the manifest's prompt and tools
+        and nothing else. Memory, topics, and history policy are composed in by
+        the application that wants them, or subclasses override this.
+        """
+        return []
+
+    def current_turn(self, incoming: str = "") -> Turn:
+        return Turn(
+            conversation_id=self._conversation.history.chat_id,
+            incoming=incoming,
+            segment=self._conversation.segment(),
+        )
+
+    def system_prompt(self, turn: Optional[Turn] = None) -> str:
+        """The manifest prompt followed by each capability's section, in order."""
         base = self._manifest.prompt.read_text(encoding="utf-8")
-        summaries = self._topics.recent_summaries()
-        if not summaries:
-            return base
-        numbered = "\n\n".join(
-            f"{index}. {summary.strip()}"
-            for index, summary in enumerate(reversed(summaries), start=1)
-        )
-        return (
-            base
-            + "\n\n# Earlier topics in this conversation (summaries, oldest first)\n\n"
-            + numbered
-        )
+        sections = self.capabilities.prompt_sections(turn or self.current_turn())
+        return "\n\n".join([base, *sections]) if sections else base
 
     def handle(self, text: str) -> str:
         return self._loop.handle(text)

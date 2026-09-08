@@ -153,14 +153,59 @@ rendered above it without destroying a partially typed message.
 `entourage.conversation` provides a configurable loop for an agent whose
 conversation outlives any one incoming-message execution:
 
-- `ConversationPolicy` selects automatic topic-shift detection and a manual
-  reset command such as `/new`.
-- `ContinuousConversation` owns the live segment, automatic/manual compaction,
-  and prompt rebuilding around durable `ChatHistory`.
+- `ConversationPolicy` retains the legacy topic-shift fields for direct callers and
+  selects a manual reset command such as `/new`. Generic configured agents disable
+  semantic topic detection; applications own that policy.
+- `ContinuousConversation` owns the live segment and prompt rebuilding around durable
+  `ChatHistory`. It can still accept the legacy optional `TopicMemory`, but does not
+  require a semantic archive provider.
 - `ContinuousAgent` supplies the main model/tool loop while the application
   supplies its tools and system-prompt builder.
-- `TopicMemory` supplies the litellm-based detector, summarizer, and file
-  archive; applications select its utility model and retention count.
+- `TopicMemory` is a compatibility helper for applications that still want the original
+  litellm-based detector and summarizer. `archive_record()` returns a structured result
+  so callers never reconstruct its filenames; `archive()` retains the original string-ID
+  return for compatibility. New applications should keep topic semantics outside the
+  execution substrate.
+
+### Capabilities
+
+Behaviour composes rather than subclasses. A **capability** is a self-contained
+unit — durable facts, topic tracking, a tool family — that an agent registers,
+and `entourage.capabilities` splits them by what a hook is allowed to do:
+
+- **Contributive** (`Capability`) — many per agent. `prompt_section()` and
+  `tools()` merge in registration order. One capability cannot invalidate
+  another, so composition is safe by construction.
+- **Exclusive** (`ConversationLifecycle`) — a capability that *also* owns
+  conversation history; at most one per agent. It decides when a segment is
+  archived, reset, evicted, or projected. Two owners would fight over the same
+  state and the symptom would surface far away, as context that drifts or
+  duplicates, so a second one is rejected at construction.
+
+```python
+agent = ConfiguredAgent(manifest, "telegram:9", capabilities=[
+    Facts(MemoryDB(state_dir / "memory.txt")),   # contributive
+    MyTopicRouting(...),                          # exclusive: owns history
+])
+```
+
+`ConfiguredAgent.default_capabilities()` is empty: a configured agent is its
+manifest's prompt and tools and nothing else. Memory and history policy are
+composed in by the application, or by overriding that method.
+
+The lifecycle returns a `TurnPlan`, which separates two things usually
+conflated:
+
+- `history` **replaces the durable record** — a reset, an archive, an eviction.
+- `view` is **what the model sees for this call only**, leaving the record
+  intact. It is how an agent shrinks or reshapes a prompt — trimming,
+  summarizing, dropping tool traffic — without losing the conversation.
+- `handled` short-circuits the turn with a reply and no model call.
+
+`builtin_capabilities` ships `Facts`, `RecentSummaries`, and
+`TopicShiftLifecycle` — the historical behaviours, as replaceable units with no
+privileged access. An agent that composes none of them is a supported
+configuration.
 
 This is logical conversation continuity over turn-level execution sessions.
 For graph-native waiting, `flow.WaitForMailbox` is a plan leaf that parks

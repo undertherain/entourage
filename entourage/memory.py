@@ -2,6 +2,7 @@ import json
 import datetime
 import uuid
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -176,6 +177,14 @@ class MemoryDB:
             return [line.strip() for line in f.readlines()]
 
 
+@dataclass(frozen=True)
+class TopicArchive:
+    id: str
+    summary: str
+    transcript_path: Path
+    summary_path: Path
+
+
 class TopicMemory:
     """LLM-assisted topic segmentation with a portable file archive.
 
@@ -226,14 +235,21 @@ class TopicMemory:
             print(f"[summarization error: {exc}]")
             return "Summary generation failed."
 
-    def archive(self, messages: list[dict]) -> str:
+    def archive_record(self, messages: list[dict]) -> TopicArchive:
+        """Archive once and return its data without exposing filename conventions."""
         topic_id = str(uuid.uuid4())
         summary = self.summarize(messages)
-        (self.archive_dir / f"summary_{topic_id}.txt").write_text(summary, encoding="utf-8")
-        (self.archive_dir / f"topic_{topic_id}.json").write_text(
+        summary_path = self.archive_dir / f"summary_{topic_id}.txt"
+        transcript_path = self.archive_dir / f"topic_{topic_id}.json"
+        summary_path.write_text(summary, encoding="utf-8")
+        transcript_path.write_text(
             json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        return topic_id
+        return TopicArchive(topic_id, summary, transcript_path, summary_path)
+
+    def archive(self, messages: list[dict]) -> str:
+        """Compatibility wrapper; new callers should use ``archive_record``."""
+        return self.archive_record(messages).id
 
     def recent_summaries(self) -> list[str]:
         files = sorted(

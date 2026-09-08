@@ -150,6 +150,12 @@ rendered above it without destroying a partially typed message.
 
 ### Continuous agents
 
+An experimental graph-independent session core now supports local durable
+mail/deadline wakeups, leased activations and atomic checkpoints. See
+[`docs/durable-sessions.md`](docs/durable-sessions.md) for its current scope and
+a runnable example that parks and resumes across fresh processes. Executable
+launching and integration with the graph runner remain follow-up work.
+
 `entourage.conversation` provides a configurable loop for an agent whose
 conversation outlives any one incoming-message execution:
 

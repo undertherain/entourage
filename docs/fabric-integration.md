@@ -1,5 +1,12 @@
 # Fabric (IOA) Integration Plan
 
+> Placement update, 2026-09-08: IOA ADR 0018 and
+> `durable-sessions-and-project-home.md` now place the graph-independent
+> durable-session execution core in Entourage, with Astral as a delivery binding
+> and `fabric-py` kept lightweight. The first local wakeup slice is documented in
+> [durable-sessions.md](durable-sessions.md). The checklist below is the earlier
+> graph-backend integration proposal, not the implementation plan for that core.
+
 ## Architectural Shift: Data-Flow over State Machine
 Entourage is evolving. While the Control-by-Return (CbR) state machine remains the perfect engine for *intra-agent* execution (tool loops, retries, crash recovery), *inter-agent* orchestration is moving to a **data-flow** model. 
 

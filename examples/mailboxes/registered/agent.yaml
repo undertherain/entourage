@@ -1,0 +1,8 @@
+definition: specialist:v1
+protocol: entourage.activation/v1
+entrypoint: agent.py:resume
+state_schema: 1
+inbox: session
+resources: [prompt.md]
+config:
+  output: ui

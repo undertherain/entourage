@@ -28,6 +28,7 @@ class Activation:
     token: str
     state: dict
     events: list[dict]
+    has_more: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,32 @@ class LocalSessions:
             )""")
             db.execute("""CREATE INDEX IF NOT EXISTS wake_pending
                 ON wake_inputs(session_id, incorporated, seq)""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(wake_sessions)")}
+            if "last_claim" not in columns:
+                db.execute("ALTER TABLE wake_sessions ADD COLUMN last_claim INTEGER NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS wake_definitions (
+                executable TEXT PRIMARY KEY, contract TEXT NOT NULL
+            )""")
+
+    def bind_definition(self, executable: str, contract: dict) -> None:
+        """Reject changes to a registered version, in the same session database."""
+        encoded = json.dumps(contract, sort_keys=True, allow_nan=False)
+        with self._transaction() as db:
+            row = db.execute("SELECT contract FROM wake_definitions WHERE executable = ?",
+                             (executable,)).fetchone()
+            if row is not None and row[0] != encoded:
+                raise ValueError(f"definition {executable!r} changed; register a new version")
+            db.execute("INSERT OR IGNORE INTO wake_definitions VALUES (?, ?)",
+                       (executable, encoded))
+
+    def inspect(self, session_id: str) -> dict:
+        """Read committed state/status without consuming mail or acquiring a lease."""
+        with self._transaction() as db:
+            row = db.execute("SELECT executable, state, status, deadline, revision "
+                             "FROM wake_sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            return {**dict(row), "state": json.loads(row["state"])}
 
     @contextmanager
     def _transaction(self):
@@ -118,15 +145,20 @@ class LocalSessions:
             return self._append(db, session_id, event)
 
     def claim(self, *, lease_seconds: float = 30,
-              executable: Optional[str] = None) -> Optional[Activation]:
+              executable: Optional[str] = None,
+              max_events: Optional[int] = None) -> Optional[Activation]:
         """Lease ready work, including expired activations and persisted deadlines.
 
         A parked session with pending mail is runnable by definition. Checking
         this predicate after wait registration closes the mail-during-park race,
         and scanning it after restart reconstructs readiness without wake hints.
+        Least-recently claimed sessions go first. A bounded batch sets has_more
+        if additional mail was already queued; later arrivals also stay pending.
         """
         if not math.isfinite(lease_seconds) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be finite and positive")
+        if max_events is not None and (type(max_events) is not int or max_events <= 0):
+            raise ValueError("max_events must be a positive integer")
         with self._transaction() as db:
             now = self.clock()
             row = db.execute("""SELECT * FROM wake_sessions s
@@ -135,7 +167,7 @@ class LocalSessions:
                 AND (status IN ('ready', 'active') OR deadline <= ? OR EXISTS (
                     SELECT 1 FROM wake_inputs i
                     WHERE i.session_id = s.id AND i.incorporated = 0))
-                ORDER BY s.rowid LIMIT 1""", (now, executable, executable, now)).fetchone()
+                ORDER BY s.last_claim, s.rowid LIMIT 1""", (now, executable, executable, now)).fetchone()
             if row is None:
                 return None
             if row["deadline"] is not None and row["deadline"] <= now:
@@ -146,12 +178,17 @@ class LocalSessions:
                 }, timer=True)
             token = uuid.uuid4().hex
             db.execute("""UPDATE wake_sessions SET status = 'active', token = ?,
-                lease_until = ? WHERE id = ?""", (token, now + lease_seconds, row["id"]))
+                lease_until = ?, last_claim = (SELECT COALESCE(MAX(last_claim), 0) + 1
+                FROM wake_sessions) WHERE id = ?""", (token, now + lease_seconds, row["id"]))
             events = [json.loads(item[0]) for item in db.execute(
                 """SELECT event FROM wake_inputs WHERE session_id = ?
-                AND incorporated = 0 ORDER BY seq""", (row["id"],))]
+                AND incorporated = 0 ORDER BY seq LIMIT ?""",
+                (row["id"], max_events + 1 if max_events is not None else -1))]
+            has_more = max_events is not None and len(events) > max_events
+            if has_more:
+                events = events[:max_events]
             return Activation(row["id"], row["executable"], token,
-                              json.loads(row["state"]), events)
+                              json.loads(row["state"]), events, has_more)
 
     def commit(self, activation: Activation, state: dict, *, incorporated: list[str],
                publish: tuple[Publication, ...] = (), deadline: Optional[float] = None,

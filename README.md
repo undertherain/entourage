@@ -8,6 +8,9 @@ resumable, and replayable. The pattern it's built on is called **Control-by-Retu
 > Status: research prototype / reference implementation — a vehicle for the idea, not a
 > production framework. Expect rough edges and a small, deliberately minimal API.
 
+Current execution work: [NOW.md](NOW.md) and the
+[shared runtime handoff](docs/execution-runtime-handoff.md).
+
 ---
 
 ## The idea
@@ -153,8 +156,19 @@ rendered above it without destroying a partially typed message.
 An experimental graph-independent session core now supports local durable
 mail/deadline wakeups, leased activations and atomic checkpoints. See
 [`docs/durable-sessions.md`](docs/durable-sessions.md) for its current scope and
-a runnable example that parks and resumes across fresh processes. Executable
-launching and integration with the graph runner remain follow-up work.
+a runnable example that parks and resumes across fresh processes.
+`entourage.executables` adds versioned Python registration, local manifests and a
+resident dispatcher: handlers return checkpoint proposals from restored state and
+mail. The [registered agent example](examples/mailboxes/registered/README.md)
+handles a user correction while a tool is pending, then resumes after restart.
+See the [executable contract](docs/resumable-executables.md). Subprocess launching
+and integration with the graph runner remain follow-up work.
+
+Start with [examples/mailboxes/](examples/mailboxes/README.md) for the
+coarse-grained direction: a resident loop handles other mail while a tool runs;
+a second agent saves its state and next step, exits, then resumes in a fresh
+process. Shared demo helpers keep both agent examples small. A longer
+[tool clarification walkthrough](docs/mailbox-tool-examples.md) is included.
 
 `entourage.conversation` provides a configurable loop for an agent whose
 conversation outlives any one incoming-message execution:

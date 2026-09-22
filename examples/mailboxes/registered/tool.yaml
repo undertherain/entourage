@@ -1,0 +1,5 @@
+definition: sources:v1
+protocol: entourage.activation/v1
+entrypoint: tools.py:resume
+state_schema: 1
+inbox: session

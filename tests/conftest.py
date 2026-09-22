@@ -3,6 +3,26 @@ import uuid
 
 import pytest
 
+
+@pytest.fixture(params=["sqlite"])
+def make_session_backend(request, tmp_path):
+    """Adapter factory for the shared session contract suite.
+
+    Repeated calls with the same name reopen the same namespace. Different names
+    are isolated. Adapter test setup owns the controllable clock; it is not part
+    of the public SessionBackend API. Add Redis here when its adapter exists.
+    """
+    from entourage.sessions import LocalSessions
+
+    if request.param != "sqlite":
+        raise NotImplementedError(f"session test adapter: {request.param}")
+
+    def make(*, clock, name="sessions"):
+        return LocalSessions(tmp_path / f"{name}.db", clock=clock)
+
+    return make
+
+
 # Redis-backed tests need a reachable server. Point ENTOURAGE_TEST_REDIS_URL
 # at one (e.g. redis://:password@localhost:6379/15 — prefer a dedicated db
 # number); tests only ever touch keys under their own throwaway namespace.

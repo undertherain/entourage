@@ -12,32 +12,17 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-
-class StaleActivation(RuntimeError):
-    """The activation no longer owns the session's write lease."""
-
-
-@dataclass(frozen=True)
-class Activation:
-    session_id: str
-    executable: str
-    token: str
-    state: dict
-    events: list[dict]
-    has_more: bool = False
+# Re-export shared types so existing entourage.sessions imports keep working.
+from .session_backend import (
+    Activation, Publication, SessionAlreadyExists, SessionBackend,
+    SessionSnapshot, Spawn, StaleActivation,
+)
 
 
-@dataclass(frozen=True)
-class Publication:
-    session_id: str
-    event: dict
-
-
-class LocalSessions:
+class LocalSessions(SessionBackend):
     """Single-host durable wake scheduling for bounded activations.
 
     Separate processes may open the same file. Transactions serialize claims,
@@ -70,6 +55,9 @@ class LocalSessions:
             columns = {row[1] for row in db.execute("PRAGMA table_info(wake_sessions)")}
             if "last_claim" not in columns:
                 db.execute("ALTER TABLE wake_sessions ADD COLUMN last_claim INTEGER NOT NULL DEFAULT 0")
+            if "completed_at" not in columns:
+                # Sessions completed before this column existed are never purged.
+                db.execute("ALTER TABLE wake_sessions ADD COLUMN completed_at REAL")
             db.execute("""CREATE TABLE IF NOT EXISTS wake_definitions (
                 executable TEXT PRIMARY KEY, contract TEXT NOT NULL
             )""")
@@ -85,14 +73,16 @@ class LocalSessions:
             db.execute("INSERT OR IGNORE INTO wake_definitions VALUES (?, ?)",
                        (executable, encoded))
 
-    def inspect(self, session_id: str) -> dict:
+    def inspect(self, session_id: str) -> SessionSnapshot:
         """Read committed state/status without consuming mail or acquiring a lease."""
         with self._transaction() as db:
             row = db.execute("SELECT executable, state, status, deadline, revision "
                              "FROM wake_sessions WHERE id = ?", (session_id,)).fetchone()
             if row is None:
                 raise KeyError(session_id)
-            return {**dict(row), "state": json.loads(row["state"])}
+            return SessionSnapshot(executable=row["executable"], state=json.loads(row["state"]),
+                                   status=row["status"], deadline=row["deadline"],
+                                   revision=row["revision"])
 
     @contextmanager
     def _transaction(self):
@@ -109,13 +99,23 @@ class LocalSessions:
         finally:
             db.close()
 
-    def create(self, session_id: str, executable: str, state: dict) -> None:
-        """Create a runnable session bound to an opaque executable version."""
+    @staticmethod
+    def _create(db, session_id: str, executable: str, state: dict) -> None:
+        if not isinstance(session_id, str) or not isinstance(executable, str):
+            raise ValueError("session_id and executable must be strings")
         if not session_id or not executable:
             raise ValueError("session_id and executable must be nonempty")
+        if not isinstance(state, dict):
+            raise ValueError("state must be a JSON object")
+        if db.execute("SELECT 1 FROM wake_sessions WHERE id = ?", (session_id,)).fetchone():
+            raise SessionAlreadyExists(session_id)
+        db.execute("""INSERT INTO wake_sessions(id, executable, state, status)
+            VALUES (?, ?, ?, 'ready')""", (session_id, executable, json.dumps(state)))
+
+    def create(self, session_id: str, executable: str, state: dict) -> None:
+        """Create a runnable session; raise SessionAlreadyExists rather than reset."""
         with self._transaction() as db:
-            db.execute("""INSERT INTO wake_sessions(id, executable, state, status)
-                VALUES (?, ?, ?, 'ready')""", (session_id, executable, json.dumps(state)))
+            self._create(db, session_id, executable, state)
 
     @staticmethod
     def _append(db, session_id: str, event: dict, *, timer: bool = False) -> bool:
@@ -192,25 +192,35 @@ class LocalSessions:
 
     def commit(self, activation: Activation, state: dict, *, incorporated: list[str],
                publish: tuple[Publication, ...] = (), deadline: Optional[float] = None,
-               complete: bool = False) -> None:
-        """Atomically checkpoint inputs, local outgoing mail and the next wait.
+               complete: bool = False, spawn: tuple[Spawn, ...] = ()) -> None:
+        """Atomically checkpoint inputs, children, local outgoing mail and the next wait.
 
         Only inputs delivered to this activation can be incorporated. Unconsumed
-        mail (including mail arriving during execution) remains ready. Parking
-        has no child-cancellation side effects. A successful commit releases the
-        lease; process exit by itself does not commit anything.
+        mail (including mail arriving during execution) remains ready. Children
+        are created before publications so the parent can address them at once.
+        Parking or completing has no child-cancellation side effects. A successful
+        commit releases the lease; process exit by itself does not commit anything.
         """
         if deadline is not None and (not math.isfinite(deadline) or complete):
             raise ValueError("deadline must be finite and belong to a waiting session")
         delivered = {event["event_id"] for event in activation.events}
         if not set(incorporated) <= delivered:
             raise ValueError("cannot incorporate an input absent from this activation")
+        children = [child.session_id for child in spawn]
+        if len(set(children)) != len(children) or activation.session_id in children:
+            raise ValueError("spawned session IDs must be distinct and differ from the parent")
         with self._transaction() as db:
+            now = self.clock()
             row = db.execute("SELECT * FROM wake_sessions WHERE id = ?",
                              (activation.session_id,)).fetchone()
             if (row is None or row["token"] != activation.token
-                    or row["lease_until"] is None or row["lease_until"] <= self.clock()):
+                    or row["lease_until"] is None or row["lease_until"] <= now):
                 raise StaleActivation(activation.session_id)
+            for child in spawn:
+                if not db.execute("SELECT 1 FROM wake_definitions WHERE executable = ?",
+                                  (child.executable,)).fetchone():
+                    raise ValueError(f"cannot spawn unbound definition {child.executable!r}")
+                self._create(db, child.session_id, child.executable, child.state)
             for event_id in incorporated:
                 db.execute("""UPDATE wake_inputs SET incorporated = 1
                     WHERE session_id = ? AND event_id = ?""",
@@ -222,6 +232,28 @@ class LocalSessions:
                     (activation.session_id,)).fetchone():
                 raise ValueError("cannot complete with unincorporated mail")
             db.execute("""UPDATE wake_sessions SET state = ?, status = ?, deadline = ?,
-                token = NULL, lease_until = NULL, revision = revision + 1 WHERE id = ?""",
+                completed_at = ?, token = NULL, lease_until = NULL,
+                revision = revision + 1 WHERE id = ?""",
                 (json.dumps(state), "complete" if complete else "waiting", deadline,
-                 activation.session_id))
+                 now if complete else None, activation.session_id))
+
+    def purge(self, *, completed_before: float, limit: Optional[int] = None) -> int:
+        """Remove old complete sessions with their retained inputs.
+
+        Completion time is the commit clock reading. Rows completed before the
+        column existed have no completion time and are kept. Removal is
+        atomic per call; a purged ID may be created again afterwards.
+        """
+        if not math.isfinite(completed_before):
+            raise ValueError("completed_before must be a finite Unix time")
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("limit must be a positive integer")
+        with self._transaction() as db:
+            ids = [row[0] for row in db.execute("""SELECT id FROM wake_sessions
+                WHERE status = 'complete' AND completed_at IS NOT NULL AND completed_at < ?
+                ORDER BY completed_at, rowid LIMIT ?""",
+                (completed_before, -1 if limit is None else limit))]
+            for session_id in ids:
+                db.execute("DELETE FROM wake_inputs WHERE session_id = ?", (session_id,))
+                db.execute("DELETE FROM wake_sessions WHERE id = ?", (session_id,))
+            return len(ids)

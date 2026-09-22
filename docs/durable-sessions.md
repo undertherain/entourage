@@ -10,6 +10,8 @@ binding, and graph authoring is optional. Detailed authoring APIs remain open.
 
 Added 2026-09-22: [registered resumable executables](resumable-executables.md)
 provide a local Python authoring API and resident dispatcher over this same store.
+The store now implements the [SessionBackend interface](session-backends.md);
+shared types and checkpoint guarantees live outside the SQLite implementation.
 
 `entourage.sessions.LocalSessions` supplies a SQLite-backed local binding with
 no graph or model dependency. A session binds explicit JSON state to an opaque
@@ -63,7 +65,8 @@ same core. They do not add executable registration or atomic child creation.
 For registration, adjacent manifests and correction during a pending tool call,
 use the [registered agent](../examples/mailboxes/registered/README.md).
 
-Validation: `python3 -m pytest -q tests/test_sessions.py` covers fresh subprocess
+Validation: `python3 -m pytest -q tests/test_session_backend.py tests/test_sessions.py`
+covers fresh subprocess
 resume, abrupt exit before commit, expired leases, concurrent claims, persisted
 deadlines, mail during parking, input deduplication, rollback of local publication,
 and isolation between two sessions sharing an executable.

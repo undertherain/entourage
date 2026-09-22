@@ -1,8 +1,9 @@
 """Codex-like mailbox checkpoint demo with a small LiteLLM-backed agent.
 
 Type while the background loop is working. Artificial step delays leave time
-to queue interjections. New events are durable only in memory for this demo and
-join the model context at named safe checkpoints.
+to queue interjections. New events live only in process memory and join the model
+context at named safe checkpoints; they do not survive process exit. This demo
+does not use the durable SessionBackend/Dispatcher API.
 
 Commands:
     /subagent TEXT  inject a typed subagent update

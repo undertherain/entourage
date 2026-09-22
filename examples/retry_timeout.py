@@ -11,6 +11,10 @@ Wrap any plan leaf in ``flow.Node(...)`` to attach an execution policy:
   as a failed one;
 - ``retry_delay``: seconds to hold a failed attempt back before re-enqueue.
 
+This in-memory graph example uses thread-based timeouts: the runtime stops
+waiting for an attempt, but its thread keeps running. It does not kill a stuck
+process. Subprocess isolation is separate work for the shard runner.
+
 The policy is stored on the execution in the GraphStore, so in a
 multi-worker deployment every worker honors it no matter which worker
 expanded the plan. The same policy can also be registered as a per-name
@@ -87,7 +91,7 @@ t0 = time.time()
 rt.run()
 show(rt.store, sid, f"finished in {time.time() - t0:.2f}s (two 0.3s retry delays)")
 
-# ── 2. Hung node, cut off by timeout; retries exhausted ───────
+# ── 2. Hung node, wait abandoned at timeout; retries exhausted ─
 
 print("\n═══ 2. hanging call with timeout=0.5, max_attempts=2 ═══")
 rt = Runtime()

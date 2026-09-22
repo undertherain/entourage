@@ -1,16 +1,17 @@
-import os
-import sys
-from pathlib import Path
+"""Graph-based coding chat with file-backed history and an in-memory graph.
 
-# Add src to path so we can import modules
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+This loop uses local file/command tools, not the registered executable dispatcher.
+Use --model for your configured provider; --help makes no model calls.
+"""
+
+import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from entourage.runtime import Runtime
-from entourage.agent import AgentWithTools, PersistableAgent
+from entourage.agent import PersistableAgent
 from entourage.tools import ListDirTool, ReadFileTool, WriteFileTool, RunCommandTool
 from entourage.memory import ChatHistory
-from entourage.flow import Sequence
 
 # Configuration
 class PersonaConfig:

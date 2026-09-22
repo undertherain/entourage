@@ -1,7 +1,8 @@
 # Tool calls that wake their caller
 
-Start with the smaller [resident and resumable agents](../examples/mailboxes/README.md).
-This page retains the longer explicit request/reply and clarification walkthrough.
+Start with the [registered agent](../examples/mailboxes/registered/README.md) for
+the current executable API. This page retains the earlier explicit request/reply
+and clarification walkthrough, alongside the [smaller prototypes](../examples/mailboxes/README.md).
 
 The coarse-grained unit is a durable agent session. An activation receives its
 saved state and mail, proposes state and outgoing messages, then releases compute.

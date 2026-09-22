@@ -4,6 +4,10 @@ One agent-owned conversation accepts Telegram messages plus local user,
 ambient/Grafana, announcement, and subagent events. All sources enter the same
 mailbox and typed event history; Telegram is transport, never history.
 
+This is the transport/history demo, not the registered session dispatcher.
+Memory or Redis provides its mailbox; history and Telegram delivery are separate
+operations, without the SessionBackend's atomic state/mail checkpoint.
+
 Environment:
     TELEGRAM_BOT_TOKEN
     TELEGRAM_ALLOWED_CHAT_IDS       comma-separated, fails closed

@@ -6,6 +6,10 @@ This narrows the earlier
 [executable lifecycle proposal](executable-lifecycle.md) to a registered Python
 dispatcher first. Graph integration and automatic process launching can follow.
 
+The dispatcher now depends on [SessionBackend](session-backends.md), with
+`LocalSessions` as the SQLite adapter. Backend-neutral types and the atomic
+checkpoint contract are in `entourage.session_backend`.
+
 ## Foundation
 
 `LocalSessions` already restores JSON state and pending mail under an expiring
@@ -75,8 +79,9 @@ Transport subscriptions and event-kind filters do not grant access authority.
 
 Start with one inbox per session for user messages, correlated tool replies and
 timers. Named shared ingress, multiple inboxes and distributed subscriptions can
-be added when a consumer needs them. Existing local publication destinations must
-be pre-created; automatic child creation remains a later extension.
+be added when a consumer needs them. Local publication destinations must exist or be
+spawned in the same proposal; ingress keying and child spawning are described in
+[session lifetimes](session-lifetimes.md).
 
 Python registration and YAML use the same definition. Entrypoints can be local
 `file.py:function` paths relative to the manifest or importable
@@ -160,6 +165,8 @@ and `has_more`. Its helpers stage effects; they do not send or commit immediatel
 | `context.send(destination, payload, key="answer:1", kind="message")` | Stable event ID; stages local publication |
 | `context.request(destination, payload, key="sources:1")` | Stable request ID; stages request with session reply address |
 | `context.reply(request, payload, key="result")` | Stages a correlated result with a stable publication ID |
+| `context.spawn(definition, state, key="research:1")` | Stages child `<session_id>:<key>` bound to a registered definition; returns its ID |
+| `context.propose(state, incorporated=ids, deadline=None, complete=False)` | Returns a `Proposal` including staged publications and children |
 | `context.propose(state, incorporated=ids, deadline=None, complete=False)` | Returns a `Proposal` including the staged publications |
 
 Keys identify logical operations and must be stable across retries and unique
@@ -168,7 +175,10 @@ the new publication. Store outstanding request IDs in state; match both correlat
 and the expected sender before accepting results. The helpers do not implement
 an authorization system or runtime-managed exchange registry. Replies have
 `kind: result`, `request_id`, `source` and `payload`; requests additionally carry
-`reply_to`. Destinations must already exist, including output adapter mailboxes.
+`reply_to`. Destinations must already exist, including output adapter mailboxes,
+unless spawned by the same proposal: children are created before publications
+are delivered. An existing child rejects the whole proposal, so a repeated
+logical spawn surfaces as a failed activation rather than a duplicate task.
 
 ## Batches, failure and scope
 
@@ -186,9 +196,11 @@ Claims rotate by durable last-claim order within each definition; a dispatcher
 rotates between its definitions. This is basic local fairness, not worker-pool
 admission, priorities or reserved capacity.
 
-Exceptions, invalid proposals and expired-lease commits return a failed result.
-They leave the previous checkpoint and unincorporated mail intact. After lease
-expiry another attempt can run. There is no attempt limit, lease renewal or
+Handler errors, invalid proposals and expired-lease commits return a failed result
+and leave the previous checkpoint and unincorporated mail intact. Infrastructure
+errors can have an unknown commit outcome; `committed=False` means success was
+not confirmed, and recovery follows durable state and leases. After an uncommitted
+lease expires another attempt can run. There is no attempt limit, lease renewal or
 dead-letter policy yet. A slow or stuck Python call cannot be killed by this
 adapter; the lease fences its eventual commit but does not stop computation or
 undo direct external effects. Event-count and dispatch-count budgets do not
@@ -197,7 +209,7 @@ for effects performed outside staged local mail.
 
 This is a trusted in-process Python interface, not isolation from hostile code.
 Warm memory is not authoritative state. No arbitrary stack is persisted, and
-parking does not cancel children or outstanding requests. Runtime status
-(ready/active/waiting/complete) remains separate from application phase.
-Subprocess management, packaged code environments, atomic child creation, graph
-integration and remote delivery remain follow-ups in [NOW.md](../NOW.md).
+parking or completing does not cancel children or outstanding requests. Runtime
+status (ready/active/waiting/complete) remains separate from application phase.
+Subprocess management, packaged code environments, graph integration and remote
+delivery remain follow-ups in [NOW.md](../NOW.md).

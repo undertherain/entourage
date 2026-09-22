@@ -1,6 +1,9 @@
 """
 Transport-neutral ingress — a remote tool call that parks and resumes.
 
+This script uses an in-memory graph/mailbox and a fake service thread. It does
+not contact a remote endpoint or demonstrate crash recovery.
+
 The graph never learns what the transport is. A node dispatches a command
 and returns a plan that parks on the *derived await conversation*
 ``corr:{correlation_id}``; whatever delivers the result — Astral subject,
@@ -40,8 +43,9 @@ class FakeRemoteService:
 
     A real adapter (Astral subscription, webhook endpoint, poller) does
     exactly this — normalize what it received into an InboundEvent and
-    call ``router.accept``, acknowledging its transport only after accept
-    returns durably. Swapping this class for a webhook changes nothing in
+    call ``router.accept``. A real adapter must use durable destination storage
+    before acknowledging its transport; this example's in-memory storage is not
+    sufficient for that guarantee. Swapping this class for a webhook changes nothing in
     the graph, the tool, or the router.
     """
 

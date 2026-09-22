@@ -9,10 +9,10 @@ import asyncio
 from copy import deepcopy
 import json
 from pathlib import Path
-import sqlite3
 import tempfile
 
-from entourage.sessions import LocalSessions, Publication
+from entourage.session_backend import Publication, SessionBackend
+from entourage.sessions import LocalSessions
 
 
 class Turn:
@@ -122,11 +122,8 @@ async def resident_demo(agent):
             await asyncio.gather(worker, producer, return_exceptions=True)
 
 
-def read_state(store):
-    with sqlite3.connect(store.path) as db:
-        return json.loads(db.execute(
-            "SELECT state FROM wake_sessions WHERE id = 'agent'"
-        ).fetchone()[0])
+def read_state(store: SessionBackend):
+    return store.inspect("agent")["state"]
 
 
 def restart_cli(steps):

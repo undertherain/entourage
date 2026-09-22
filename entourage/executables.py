@@ -1,4 +1,4 @@
-"""Registered, graph-independent Python activations over LocalSessions.
+"""Registered, graph-independent Python activations over a SessionBackend.
 
 This is a trusted in-process adapter, not a Python security sandbox. Code returns
 proposals; only the dispatcher receives the store's activation/lease token.
@@ -19,7 +19,7 @@ from threading import Event
 from typing import Callable, Optional
 import uuid
 
-from .sessions import LocalSessions, Publication
+from .session_backend import Publication, SessionBackend, Spawn
 
 
 PROTOCOL = "entourage.activation/v1"
@@ -121,6 +121,7 @@ class Proposal:
     publish: tuple[Publication, ...] = ()
     deadline: Optional[float] = None
     complete: bool = False
+    spawn: tuple[Spawn, ...] = ()
 
 
 class Context:
@@ -133,6 +134,7 @@ class Context:
         self.config = _json_copy(config)
         self.has_more = has_more
         self._publish = []
+        self._spawn = []
 
     def send(self, destination, payload, *, key, kind="message"):
         """Stage mail with a key stable across retries and unique per operation."""
@@ -157,13 +159,36 @@ class Context:
         self._publish[-1].event["request_id"] = request_id
         return event_id
 
+    def spawn(self, definition, state, *, key):
+        """Stage a child session `<session_id>:<key>` bound to a registered definition.
+
+        The child is created with the parent's checkpoint, so mail staged to the
+        returned ID in the same proposal is delivered atomically. Keys are stable
+        across retries: an existing child rejects the whole proposal, which is how
+        a repeated logical spawn is detected rather than duplicated.
+        """
+        if not isinstance(key, str) or not key:
+            raise ValueError("spawn key must be a nonempty string")
+        if not isinstance(state, dict):
+            raise ValueError("child state must be a JSON object")
+        child = f"{self.session_id}:{key}"
+        self._spawn.append(Spawn(child, definition, _json_copy(state)))
+        return child
+
     def propose(self, state, *, incorporated=(), deadline=None, complete=False):
         return Proposal(_json_copy(state), tuple(incorporated),
-                        tuple(deepcopy(self._publish)), deadline, complete)
+                        tuple(deepcopy(self._publish)), deadline, complete,
+                        tuple(deepcopy(self._spawn)))
 
 
 @dataclass(frozen=True)
 class DispatchResult:
+    """Outcome observed by this dispatcher call.
+
+    committed=False means commit was not confirmed. Infrastructure errors can
+    hide an accepted remote commit; backend recovery resolves that uncertainty.
+    """
+
     session_id: str
     committed: bool
     error: Optional[Exception] = None
@@ -172,12 +197,13 @@ class DispatchResult:
 class Dispatcher:
     """Restore, invoke, validate and commit one bounded mail batch at a time.
 
-    Exceptions and rejected commits leave the checkpoint untouched; retry becomes
-    eligible after lease expiry. There is no attempt limit or lease renewal yet.
+    Handler/validation failures leave the checkpoint untouched; retry becomes
+    eligible after lease expiry. Infrastructure failures may have an unknown
+    commit outcome. There is no attempt limit or lease renewal yet.
     A blocked Python call cannot be killed here; process isolation is a follow-on.
     """
 
-    def __init__(self, store: LocalSessions, *, max_events=64, lease_seconds=30):
+    def __init__(self, store: SessionBackend, *, max_events=64, lease_seconds=30):
         if type(max_events) is not int or max_events < 1:
             raise ValueError("max_events must be a positive integer")
         if not math.isfinite(lease_seconds) or lease_seconds <= 0:
@@ -227,7 +253,8 @@ class Dispatcher:
                 self.store.commit(activation, _json_copy(proposal.state),
                                   incorporated=list(proposal.incorporated),
                                   publish=deepcopy(proposal.publish),
-                                  deadline=proposal.deadline, complete=proposal.complete)
+                                  deadline=proposal.deadline, complete=proposal.complete,
+                                  spawn=deepcopy(proposal.spawn))
             except Exception as error:
                 return DispatchResult(activation.session_id, False, error)
             return DispatchResult(activation.session_id, True)

@@ -1,14 +1,18 @@
 # Mailbox agents
 
-Start with the two small author-facing examples. Run commands from the repository
-root; no model keys or external services are needed.
+Start with the **[registered agent](registered/README.md)** for the implemented
+`Executable`/`Dispatcher` API: adjacent manifest, prompt and tools, correction
+while waiting for a reply, and recovery across fresh processes. Its SQLite store
+implements the [SessionBackend contract](../../docs/session-backends.md).
+Run commands from the repository root; no model keys or external services are needed.
 
-For the implemented registration/dispatcher API, use the
-[registered agent](registered/README.md): adjacent manifest, prompt and tools,
-correction while waiting for a reply, and recovery across fresh processes.
+The smaller examples below are earlier teaching prototypes retained to explain
+the execution styles. Their `Turn`, `save` and dispatch helpers are not public SDK
+APIs; use the registered example when starting an application.
 
 | Example | What to read |
 | --- | --- |
+| [registered/](registered/README.md) | Current API: versioned executable registration, atomic proposals and a resident dispatcher |
 | [resident.py](resident.py) | Receive mail → dispatch tool → handle other mail → ingest result |
 | [resumable.py](resumable.py) | Do work → save state and next step → exit → resume in a fresh process |
 | [support.py](support.py) | Shared demo helpers, SQLite setup, mock tool and command-line plumbing |
@@ -54,6 +58,8 @@ looks up its saved next step and calls `finish` with the tool reply. It does not
 rerun `prepare`. This is restart from an explicit checkpoint, not from an arbitrary
 instruction or a saved Python stack. Renaming a step requires migrating its saved
 name; these examples do not implement definition version migration.
+This prototype assumes the next wake contains its expected result; arbitrary
+user amendments are handled by the registered example, not by `finish` here.
 
 ## What the helpers actually provide
 
@@ -65,8 +71,8 @@ name; these examples do not implement definition version migration.
   to it after restoring state.
 - `mailbox` supplies successive leased batches in the same process.
 
-These are **example-only helpers over `LocalSessions`**, not a registered binary
-launcher or a completed public SDK. The examples pre-create one agent and one
+These are **example-only helpers over `LocalSessions`**. The public dispatcher
+and proposal API live in `entourage.executables`. These prototypes pre-create one agent and one
 mock tool, support one outstanding call, and assume the documented input kinds.
 They omit deployment, automatic child creation and production supervision.
 The tool CLI stands in for a runtime worker; automatic process wakeup is future

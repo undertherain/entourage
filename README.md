@@ -127,7 +127,7 @@ python3 examples/cli.py
 
 - Interact with the agent in natural language.
 - `/new` starts a fresh session (clears context, keeps long-term memory).
-- `--debug` enables verbose output and prints the generated graph:
+- `--debug` enables model/tool output and runtime logging:
 
 ```bash
 python3 examples/cli.py --debug
@@ -163,12 +163,18 @@ mail. The [registered agent example](examples/mailboxes/registered/README.md)
 handles a user correction while a tool is pending, then resumes after restart.
 See the [executable contract](docs/resumable-executables.md). Subprocess launching
 and integration with the graph runner remain follow-up work.
+The dispatcher depends on a [session backend interface](docs/session-backends.md)
+covering state, mail, leases and atomic checkpoints; SQLite is its current
+implementation, with a reusable conformance suite for future adapters.
+Session lifetime is an application decision, not a runtime one: ingress keying
+(per event, per conversation or singleton), parent-spawned task sessions and
+completed-session retention are described in
+[session lifetimes](docs/session-lifetimes.md).
 
-Start with [examples/mailboxes/](examples/mailboxes/README.md) for the
-coarse-grained direction: a resident loop handles other mail while a tool runs;
-a second agent saves its state and next step, exits, then resumes in a fresh
-process. Shared demo helpers keep both agent examples small. A longer
-[tool clarification walkthrough](docs/mailbox-tool-examples.md) is included.
+Start with the [registered example](examples/mailboxes/registered/README.md) for
+the current API. The other [mailbox examples](examples/mailboxes/README.md) retain
+the earlier receive-loop and saved-step teaching prototypes, plus a longer
+[tool clarification walkthrough](docs/mailbox-tool-examples.md).
 
 `entourage.conversation` provides a configurable loop for an agent whose
 conversation outlives any one incoming-message execution:
@@ -327,9 +333,11 @@ Telegram group privacy through BotFather when the bot must observe ordinary
 group chatter rather than only commands and direct mentions.
 
 The event history is persistent under `data/telegram-group-manager/`. With the
-memory backend, pending work remains process-local; with Redis, mailbox events,
-leases, deduplication keys, the ready queue, and execution graphs share one
-durable backend family. Graph-integrated waiting sessions remain the next layer.
+memory backend, pending mail remains process-local; Redis stores the mailbox
+events, leases and deduplication keys. This demo uses the family's mailbox, with
+history writes and Telegram delivery performed separately. It does not use an
+execution graph or the new atomic session checkpoint API. Migrating the transport
+demo to that API remains follow-up work.
 
 ---
 

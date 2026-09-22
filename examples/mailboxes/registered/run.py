@@ -19,11 +19,15 @@ def main():
     parser.add_argument("text", nargs="?", default="Quiet indoor activities in Kyoto")
     args = parser.parse_args()
     store = LocalSessions(args.database)
+    if args.command == "show":
+        # Observation must work even when executable source is unavailable or changed.
+        print(json.dumps({name: store.inspect(name) for name in ("research", "events")}, indent=2))
+        return
     dispatcher = Dispatcher(store)
-    dispatcher.register(Executable.from_manifest(HERE / "agent.yaml"))
-    if args.command in ("start", "tool", "serve"):
-        tool = Dispatcher(store).register(Executable.from_manifest(HERE / "tool.yaml"))
+    manifest = "tool.yaml" if args.command == "tool" else "agent.yaml"
+    dispatcher.register(Executable.from_manifest(HERE / manifest))
     if args.command == "start":
+        tool = Dispatcher(store).register(Executable.from_manifest(HERE / "tool.yaml"))
         # Output is a durable mailbox, consumed by a UI adapter in a real application.
         store.create("ui", "fixture-output:v1", {})
         tool.create("sources", "sources:v1", {})
@@ -34,11 +38,6 @@ def main():
     elif args.command == "correct":
         store.append("research", {"event_id": "correction:1", "kind": "user",
                                   "payload": {"brief": args.text}})
-    elif args.command == "tool":
-        dispatcher = tool
-    elif args.command == "show":
-        print(json.dumps({name: store.inspect(name) for name in ("research", "events")}, indent=2))
-        return
     elif args.command == "serve":
         dispatcher.register(Executable.from_manifest(HERE / "tool.yaml"))
         try:

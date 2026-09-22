@@ -3,6 +3,8 @@
 An ordinary [agent.py](agent.py), adjacent [manifest](agent.yaml), [prompt](prompt.md)
 and mock [tools](tools.py). The runtime owns registration, restoration, leases and
 commits. No graphs, model keys or external services are needed.
+`Dispatcher` accepts the [SessionBackend interface](../../../docs/session-backends.md);
+this CLI chooses `LocalSessions`, its SQLite implementation.
 
 Run from the repository root with a fresh database path. Each command starts a
 new process:
@@ -27,11 +29,21 @@ Use it after `start` to process the request and result automatically. It uses th
 same activation path as the fresh-process commands. The CLI/UI process itself
 does not need to keep an activation open. `show` observes committed state without
 claiming either agent's inbox.
+It does not load executable source or validate definition fingerprints, so saved
+state remains inspectable after code changes. `tool` loads only the tool definition.
 
 The mock result deliberately covers indoor and outdoor options so the amended
 brief can still use it. Deciding to discard stale results or issue revised
 requests belongs in application code. This demo accepts one correction identity
 and one request per Research session; repeated delivery deduplicates them.
+
+Both agent sessions deliberately use `complete=True` after their one answer.
+`correct` is an amendment while Research is pending, not a follow-up after it has
+finished. A conversation that accepts later questions must park after answering
+and assign new publication/request keys per turn. `serve` keeps the dispatcher
+running; it does not reopen completed sessions or implement per-agent processes,
+ten-minute idle grace, or automatic subprocess launch. Those are the next
+[shard-runner proof](../../../docs/runner-shards.md).
 
 Definitions are checked against a durable contract in the session database:
 entrypoint source, declared resources, configuration and state schema must match

@@ -1,5 +1,9 @@
 """
-WaitForMailbox — a session that parks durably and wakes on mail or timer.
+WaitForMailbox — graph waiting and wakeup on mail or timer.
+
+This script uses the in-memory Runtime backend and a background thread. It
+demonstrates wait semantics within one process, not persistence across restarts.
+For a file-backed restart walkthrough see examples/mailboxes/registered/README.md.
 
 ``WaitForMailbox`` is a plan leaf: wherever a node could go, a wait can
 go. The execution parks in the graph store (status ``waiting``, holding no
@@ -67,7 +71,7 @@ show_status(rt, sid, "parked")
 
 def late_interjection():
     time.sleep(0.3)
-    print("    (0.3s later, another process appends to the mailbox...)")
+    print("    (0.3s later, a background thread appends to the mailbox...)")
     rt.mailbox.append("support:alice", {"kind": "user", "content": "nevermind, fixed it"})
 
 threading.Thread(target=late_interjection).start()

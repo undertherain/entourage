@@ -18,6 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples/mailboxes/registered"
 
 
+def test_dispatcher_import_does_not_load_a_concrete_session_backend():
+    script = """
+import sys
+from entourage.executables import Dispatcher
+from entourage.session_backend import SessionBackend
+assert 'entourage.sessions' not in sys.modules
+assert 'sqlite3' not in sys.modules
+assert Dispatcher.__init__.__annotations__['store'] is SessionBackend
+"""
+    subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=True,
+                   capture_output=True, text=True, timeout=10)
+
+
 @pytest.fixture
 def runtime(tmp_path):
     now = [100.0]
@@ -232,6 +245,32 @@ def run_example(database, command, *args):
     return result.stdout
 
 
+def test_example_observation_and_tool_do_not_require_agent_source(tmp_path, monkeypatch, capsys):
+    from examples.mailboxes.registered import run as cli
+
+    database = tmp_path / "demo.db"
+    run_example(database, "start")
+    original_loader = Executable.from_manifest
+
+    def load_available_definition(path):
+        if path.name == "agent.yaml":
+            raise FileNotFoundError("agent source no longer available")
+        return original_loader(path)
+
+    monkeypatch.setattr(Executable, "from_manifest", staticmethod(load_available_definition))
+    monkeypatch.setattr(sys, "argv", ["run", str(database), "show"])
+    cli.main()
+    saved = json.loads(capsys.readouterr().out)
+    assert saved["research"]["state"]["phase"] == "awaiting_sources"
+    assert saved["events"]["status"] == "complete"
+
+    monkeypatch.setattr(sys, "argv", ["run", str(database), "tool"])
+    cli.main()
+    assert "Committed sources" in capsys.readouterr().out
+    store = LocalSessions(database)
+    assert any(event["kind"] == "result" for event in inputs(store, "research"))
+
+
 def test_two_sessions_correction_restart_and_duplicate_delivery(tmp_path):
     database = tmp_path / "demo.db"
     run_example(database, "start")
@@ -326,3 +365,67 @@ def test_old_database_restores_waiting_session_after_upgrade(tmp_path):
     fresh = LocalSessions(database)
     assert fresh.inspect("legacy")["revision"] == 5
     assert fresh.inspect("legacy")["state"] == {"brief": "saved before upgrade", "resumed": True}
+
+
+def test_context_spawn_creates_child_and_briefs_it_atomically(runtime):
+    store, now = runtime
+    attempts = []
+
+    def concierge(ctx, state, mail):
+        attempts.append(ctx.activation_id)
+        child = ctx.spawn("research:v1", {"phase": "ready"}, key="research:1")
+        state["pending"] = ctx.request(child, {"brief": "Kyoto"}, key="research:1")
+        state["child"] = child
+        if len(attempts) == 1:
+            raise RuntimeError("crash after staging, before commit")
+        return ctx.propose(state, incorporated=[e["event_id"] for e in mail])
+
+    def research(ctx, state, mail):
+        request = mail[0]
+        assert request["kind"] == "request" and request["reply_to"] == "concierge-main"
+        ctx.reply(request, {"sources": ["guide"]})
+        return ctx.propose({"phase": "done"}, incorporated=[request["event_id"]],
+                           complete=True)
+
+    dispatcher = (Dispatcher(store, lease_seconds=1)
+                  .register(Executable("concierge:v1", concierge))
+                  .register(Executable("research:v1", research)))
+    dispatcher.create("concierge-main", "concierge:v1", {})
+    store.append("concierge-main", {"event_id": "ask", "kind": "user", "payload": {}})
+    failed = dispatcher.run_once()
+    assert not failed.committed
+    with pytest.raises(KeyError):
+        store.inspect("concierge-main:research:1")  # nothing staged leaked
+    now[0] += 1
+    assert dispatcher.run_once().committed  # retry spawns the same child once
+    child = store.inspect("concierge-main:research:1")
+    assert child["executable"] == "research:v1" and child["state"] == {"phase": "ready"}
+    assert dispatcher.run_once().committed  # research answers and completes
+    resumed = store.claim(executable="concierge:v1")
+    assert resumed.events[0]["kind"] == "result"
+    assert resumed.events[0]["request_id"] == resumed.state["pending"]
+    assert resumed.events[0]["source"] == "concierge-main:research:1"
+    store.commit(resumed, resumed.state, incorporated=[resumed.events[0]["event_id"]])
+    assert store.inspect("concierge-main:research:1")["status"] == "complete"
+
+
+def test_repeated_logical_spawn_is_rejected_not_duplicated(runtime):
+    store, now = runtime
+
+    def resume(ctx, state, mail):
+        ctx.spawn("research:v1", {}, key="research:1")
+        return ctx.propose(state, incorporated=[e["event_id"] for e in mail])
+
+    def child(ctx, state, mail):
+        return ctx.propose(state, incorporated=[], complete=True)
+
+    dispatcher = (Dispatcher(store).register(Executable("concierge:v1", resume))
+                  .register(Executable("research:v1", child)))
+    dispatcher.create("concierge-main", "concierge:v1", {})
+    assert [r.committed for r in dispatcher.run_until_idle()] == [True, True]
+    store.append("concierge-main", {"event_id": "again"})
+    (result,) = dispatcher.run_until_idle()
+    assert not result.committed and "concierge-main:research:1" in str(result.error)
+    assert store.inspect("concierge-main")["revision"] == 1
+    assert store.inspect("concierge-main:research:1")["status"] == "complete"
+    assert inputs(store, "concierge-main")[0]["event_id"] == "again"

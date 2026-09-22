@@ -1,6 +1,9 @@
 """
 Spawn on the commit — fork-join, a supervisor loop, and a lapsing monitor.
 
+These are graph sessions executed in one process on in-memory backends. Child
+sessions here are not OS processes or the proposed shard runner's managed agents.
+
 ``Transition(spawn=[Spawn(...)])`` creates a child session atomically with
 the parent node's completion: deterministic child identity (replay cannot
 twin it), lineage in the child's initial state, and the child contract
@@ -122,7 +125,7 @@ rt.run()
 print("\nAct 3 — a remote that never answers; the armed monitor lapses:")
 
 def dispatch_into_the_void(state):
-    print("    dispatch: publishing command to a dead remote, arming a 0.5s "
+    print("    dispatch: simulating an unanswered request, arming a 0.5s "
           "deadline monitor on the same commit")
     return Transition(
         state=state,

@@ -1,17 +1,17 @@
-import asyncio
-import os
-import sys
-from pathlib import Path
+"""Older graph-based chat loop with file-backed chat history.
 
-# Add src to path so we can import modules
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+The execution graph is in memory. For explicit session checkpoint/restart, see
+examples/mailboxes/registered/README.md. Use --model for your configured provider.
+"""
+
+import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from entourage.runtime import Runtime
-from entourage.agent import AgentWithTools, PersistableAgent
+from entourage.agent import PersistableAgent
 from entourage.tools import TavilySearchTool, MemoryTool
 from entourage.memory import ChatHistory, MemoryDB
-from entourage.flow import Sequence
 
 # Configuration
 class PersonaConfig:
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="claude-3-haiku-20240307", help="Model name to use")
     parser.add_argument("--base-url", type=str, default=None, help="Base URL for the API")
-    parser.add_argument("--debug", action="store_true", help="Enable debug output and graph logging")
+    parser.add_argument("--debug", action="store_true", help="Enable model/tool and runtime logs")
     args = parser.parse_args()
 
     # Configure logging

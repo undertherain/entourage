@@ -8,6 +8,13 @@ APIs. See [NOW.md](../NOW.md) for the implementation baseline.
 implements versioned registration, adjacent manifests and a resident dispatcher.
 The process-launch and grace-policy schema below remains a proposal.
 
+Further user refinement: [deployment shards](runner-shards.md) scope a runner to
+an independently operated agent group and place residency in its deployment
+configuration. Concierge can start eagerly and remain resident; Events can launch
+on demand and remain warm for ten minutes. External service bindings cover an
+always-on NAS OCR endpoint. This replaces the assumption of a required global
+runner and supplies the next automatic-launch proof.
+
 ## What exists
 
 - The graph runtime executes registered Python callables.

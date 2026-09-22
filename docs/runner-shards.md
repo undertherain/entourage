@@ -80,7 +80,9 @@ bound to that member. They are deployment policy, so changing a ten-minute grace
 period does not require migrating application state or changing the code version.
 Future per-session overrides must remain within the shard's resource limits.
 
-Bootstrap creates declared sessions only when absent. Restart never overwrites
+`SessionBackend.list_sessions` supplies the enumeration eager start needs: known
+nonterminal sessions per definition, without claiming them. Bootstrap creates
+declared sessions only when absent. Restart never overwrites
 saved state with `initial_state`, rebinds an existing definition silently or
 resurrects a terminal session. New conversation sessions may instead be created by
 application ingress. `start: eager` applies to known, nonterminal sessions; it does

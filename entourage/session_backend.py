@@ -63,6 +63,16 @@ class SessionSnapshot(TypedDict):
     revision: int
 
 
+class SessionListing(TypedDict):
+    """One row of an enumeration: identity and lifecycle without state or mail."""
+
+    session_id: str
+    executable: str
+    status: Literal["ready", "active", "waiting", "complete"]
+    deadline: Optional[float]
+    revision: int
+
+
 class SessionBackend(ABC):
     """Coherent persistence for sessions, mailboxes, leases and checkpoints.
 
@@ -105,6 +115,18 @@ class SessionBackend(ABC):
         """
 
     @abstractmethod
+    def list_sessions(self, *, executable: Optional[str] = None,
+                      status: Optional[str] = None,
+                      limit: Optional[int] = None) -> list[SessionListing]:
+        """Enumerate sessions in creation order, optionally filtered.
+
+        Do not load state or mail, claim anything or change readiness. Complete
+        sessions are included unless filtered out. A runner uses this to warm
+        eager sessions, find sessions bound to superseded definitions and
+        reconcile after restart; it is an observation, not a scheduling query.
+        """
+
+    @abstractmethod
     def append(self, session_id: str, event: dict) -> bool:
         """Persist mail; return False for an already recorded event_id.
 
@@ -137,7 +159,8 @@ class SessionBackend(ABC):
     @abstractmethod
     def commit(self, activation: Activation, state: dict, *, incorporated: list[str],
                publish: tuple[Publication, ...] = (), deadline: Optional[float] = None,
-               complete: bool = False, spawn: tuple[Spawn, ...] = ()) -> None:
+               complete: bool = False, spawn: tuple[Spawn, ...] = (),
+               rebind: Optional[str] = None) -> None:
         """Atomically save state, incorporate inputs, spawn, publish and set the wake.
 
         Validate against the runtime-held activation: incorporated IDs must have
@@ -151,6 +174,12 @@ class SessionBackend(ABC):
         SessionAlreadyExists or ValueError and roll back the whole checkpoint
         otherwise. Children are independent sessions afterwards: the parent's
         later completion, purge or failure does not cancel or complete them.
+
+        rebind names a different bound definition the session belongs to from
+        this checkpoint on; it cannot accompany complete=True. The saved state is
+        the first state that definition sees. Unincorporated mail is retained and
+        remains ready for the new definition. Session ID, revision history and
+        retained input IDs are unchanged, so no publication is replayed.
 
         Success increments revision once, releases the lease and sets status to
         waiting or complete. deadline replaces the old deadline (None clears it);

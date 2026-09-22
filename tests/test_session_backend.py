@@ -341,3 +341,63 @@ def test_purge_removes_only_old_completed_sessions_and_ends_their_dedup(sessions
     assert store.inspect("parked")["status"] == "waiting"
     with pytest.raises(ValueError):
         store.purge(completed_before=400, limit=0)
+
+
+def test_list_sessions_enumerates_without_state_or_claiming(sessions):
+    store, _ = sessions
+    park(store, "a", {"x": 1})
+    store.create("b", "concierge:v1", {"big": True})
+    store.append("a", mail("input"))
+    finished = store.claim(executable="travel:v1")
+    store.commit(finished, {}, incorporated=["input"], complete=True)
+    store.create("c", "concierge:v1", {})
+    listing = store.list_sessions()
+    assert [row["session_id"] for row in listing] == ["a", "b", "c"]
+    assert listing[1] == {"session_id": "b", "executable": "concierge:v1",
+                          "status": "ready", "deadline": None, "revision": 0}
+    assert listing[0]["status"] == "complete" and listing[0]["revision"] == 2
+    assert all("state" not in row for row in listing)
+    assert [r["session_id"] for r in store.list_sessions(executable="travel:v1")] == ["a"]
+    assert [r["session_id"] for r in store.list_sessions(status="ready")] == ["b", "c"]
+    assert [r["session_id"] for r in store.list_sessions(status="ready", limit=1)] == ["b"]
+    assert store.list_sessions(executable="none:v1") == []
+    with pytest.raises(ValueError):
+        store.list_sessions(status="parked")
+    assert store.claim().session_id == "b"  # enumeration claimed nothing
+
+
+def test_rebind_moves_session_to_new_definition_keeping_mail_and_history(sessions):
+    store, _ = sessions
+    store.bind_definition("concierge:v2", {"schema": 2})
+    park(store, "main", {"history": ["old"]})
+    store.append("main", mail("first"))
+    store.append("main", mail("second"))
+    activation = store.claim(max_events=1)
+    store.commit(activation, {"summary": "compacted"}, incorporated=["first"],
+                 rebind="concierge:v2")
+    snapshot = store.inspect("main")
+    assert snapshot["executable"] == "concierge:v2"
+    assert snapshot["state"] == {"summary": "compacted"} and snapshot["revision"] == 2
+    assert store.claim(executable="travel:v1") is None
+    resumed = store.claim(executable="concierge:v2")
+    assert resumed.events == [mail("second")]
+    assert store.append("main", mail("first")) is False  # dedup history retained
+
+
+def test_rebind_requires_bound_different_definition_and_no_completion(sessions):
+    store, now = sessions
+    store.bind_definition("concierge:v2", {"schema": 2})
+    store.create("main", "travel:v1", {})
+    activation = store.claim(lease_seconds=1)
+    with pytest.raises(ValueError, match="unbound"):
+        store.commit(activation, {}, incorporated=[], rebind="ghost:v9")
+    with pytest.raises(ValueError, match="different"):
+        store.commit(activation, {}, incorporated=[], rebind="travel:v1")
+    with pytest.raises(ValueError, match="continues"):
+        store.commit(activation, {}, incorporated=[], rebind="concierge:v2", complete=True)
+    assert store.inspect("main")["executable"] == "travel:v1"
+    assert store.inspect("main")["revision"] == 0
+    now[0] += 1
+    with pytest.raises(StaleActivation):
+        store.commit(activation, {}, incorporated=[], rebind="concierge:v2")
+    assert store.inspect("main")["executable"] == "travel:v1"

@@ -18,7 +18,7 @@ from typing import Callable, Optional
 # Re-export shared types so existing entourage.sessions imports keep working.
 from .session_backend import (
     Activation, Publication, SessionAlreadyExists, SessionBackend,
-    SessionSnapshot, Spawn, StaleActivation,
+    SessionListing, SessionSnapshot, Spawn, StaleActivation,
 )
 
 
@@ -83,6 +83,23 @@ class LocalSessions(SessionBackend):
             return SessionSnapshot(executable=row["executable"], state=json.loads(row["state"]),
                                    status=row["status"], deadline=row["deadline"],
                                    revision=row["revision"])
+
+    def list_sessions(self, *, executable: Optional[str] = None,
+                      status: Optional[str] = None,
+                      limit: Optional[int] = None) -> list[SessionListing]:
+        """Enumerate identity and lifecycle in creation order; state is not loaded."""
+        if status is not None and status not in ("ready", "active", "waiting", "complete"):
+            raise ValueError("status must be ready, active, waiting or complete")
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("limit must be a positive integer")
+        with self._transaction() as db:
+            rows = db.execute("""SELECT id, executable, status, deadline, revision
+                FROM wake_sessions WHERE (? IS NULL OR executable = ?)
+                AND (? IS NULL OR status = ?) ORDER BY rowid LIMIT ?""",
+                (executable, executable, status, status, -1 if limit is None else limit))
+            return [SessionListing(session_id=row["id"], executable=row["executable"],
+                                   status=row["status"], deadline=row["deadline"],
+                                   revision=row["revision"]) for row in rows]
 
     @contextmanager
     def _transaction(self):
@@ -192,7 +209,8 @@ class LocalSessions(SessionBackend):
 
     def commit(self, activation: Activation, state: dict, *, incorporated: list[str],
                publish: tuple[Publication, ...] = (), deadline: Optional[float] = None,
-               complete: bool = False, spawn: tuple[Spawn, ...] = ()) -> None:
+               complete: bool = False, spawn: tuple[Spawn, ...] = (),
+               rebind: Optional[str] = None) -> None:
         """Atomically checkpoint inputs, children, local outgoing mail and the next wait.
 
         Only inputs delivered to this activation can be incorporated. Unconsumed
@@ -203,6 +221,10 @@ class LocalSessions(SessionBackend):
         """
         if deadline is not None and (not math.isfinite(deadline) or complete):
             raise ValueError("deadline must be finite and belong to a waiting session")
+        if rebind is not None and (not isinstance(rebind, str) or not rebind or complete):
+            raise ValueError("rebind must name a definition for a session that continues")
+        if rebind == activation.executable:
+            raise ValueError("rebind must name a different definition")
         delivered = {event["event_id"] for event in activation.events}
         if not set(incorporated) <= delivered:
             raise ValueError("cannot incorporate an input absent from this activation")
@@ -216,6 +238,9 @@ class LocalSessions(SessionBackend):
             if (row is None or row["token"] != activation.token
                     or row["lease_until"] is None or row["lease_until"] <= now):
                 raise StaleActivation(activation.session_id)
+            if rebind is not None and not db.execute(
+                    "SELECT 1 FROM wake_definitions WHERE executable = ?", (rebind,)).fetchone():
+                raise ValueError(f"cannot rebind to unbound definition {rebind!r}")
             for child in spawn:
                 if not db.execute("SELECT 1 FROM wake_definitions WHERE executable = ?",
                                   (child.executable,)).fetchone():
@@ -232,10 +257,10 @@ class LocalSessions(SessionBackend):
                     (activation.session_id,)).fetchone():
                 raise ValueError("cannot complete with unincorporated mail")
             db.execute("""UPDATE wake_sessions SET state = ?, status = ?, deadline = ?,
-                completed_at = ?, token = NULL, lease_until = NULL,
-                revision = revision + 1 WHERE id = ?""",
+                completed_at = ?, executable = COALESCE(?, executable), token = NULL,
+                lease_until = NULL, revision = revision + 1 WHERE id = ?""",
                 (json.dumps(state), "complete" if complete else "waiting", deadline,
-                 now if complete else None, activation.session_id))
+                 now if complete else None, rebind, activation.session_id))
 
     def purge(self, *, completed_before: float, limit: Optional[int] = None) -> int:
         """Remove old complete sessions with their retained inputs.

@@ -53,6 +53,16 @@ Full repository regression: **239 passed, 132 skipped**.
 See [session backends](docs/session-backends.md). Redis remains unimplemented for
 this core; automatic launch can build against the SQLite adapter.
 
+**Session upgrades and enumeration (2026-09-22):** `commit(rebind=...)` moves a
+session to another bound definition at its checkpoint, keeping ID, history,
+dedup and pending mail. `Executable.upgrades` maps superseded definitions to a
+`migrate(context, state, mail)` handler; the dispatcher claims those sessions
+only when ready and rebinds at commit, so migration happens lazily at the next
+wake, which is the only moment a definition matters. `list_sessions` enumerates
+identity and lifecycle without state for eager start and reconciliation. Prompt
+files remain part of the code identity; see [session upgrades](docs/session-upgrades.md).
+Focused validation: **53 passed**.
+
 **Session lifetimes (2026-09-22):** lifetime is keying plus completion, not a
 runtime property. `entourage.session_ingress` derives session IDs per event, per
 conversation or singleton and creates-if-absent before an idempotent append.
@@ -137,8 +147,8 @@ the registered CLI can inspect saved state without loading executable source.
 
 Executable deployment, subprocess management, runtime-managed exchange tracking,
 worker pools, lease renewal, hard execution/memory/payload-byte limits, purge
-scheduling, definition rebind for long-lived sessions, session enumeration for
-eager start, graph integration and Astral delivery. Pending requests are
+scheduling, runner-driven upgrade of quiet eager sessions, adoptable prompt
+resources outside the code identity, graph integration and Astral delivery. Pending requests are
 currently explicit application state. Exceptions retry after lease expiry with no
 attempt limit; no terminal failure/dead-letter policy exists yet. Handlers have an
 optional ordinary Python phase router; arbitrary coroutine stacks are not

@@ -97,7 +97,9 @@ interpreter versions and external assets are not automatically pinned. List
 additional local dependencies as resources when their changes should be checked.
 `development: true` explicitly omits source/resource fingerprints while still
 binding schema/config. It does not migrate saved phase names or state. A new
-definition version does not automatically rebind existing sessions.
+definition version does not automatically rebind existing sessions; it declares
+`upgrades: {old:v1: agent.py:migrate}` and the dispatcher migrates each old
+session lazily when it next wakes. See [session upgrades](session-upgrades.md).
 
 ## The mini-router belongs inside the executable
 
@@ -157,8 +159,8 @@ versions are left for another worker; duplicate local registration is rejected.
 `store.inspect(session_id)` observes committed state without consuming mail.
 
 Handlers receive a fresh `Context`, a copied state dictionary and copied mail.
-Context exposes `session_id`, `definition`, per-attempt `activation_id`, `config`
-and `has_more`. Its helpers stage effects; they do not send or commit immediately:
+Context exposes `session_id`, `definition`, per-attempt `activation_id`, `config`,
+`has_more` and, during a migration, `upgrading_from`. Its helpers stage effects; they do not send or commit immediately:
 
 | Helper | Result |
 | --- | --- |
@@ -166,7 +168,7 @@ and `has_more`. Its helpers stage effects; they do not send or commit immediatel
 | `context.request(destination, payload, key="sources:1")` | Stable request ID; stages request with session reply address |
 | `context.reply(request, payload, key="result")` | Stages a correlated result with a stable publication ID |
 | `context.spawn(definition, state, key="research:1")` | Stages child `<session_id>:<key>` bound to a registered definition; returns its ID |
-| `context.propose(state, incorporated=ids, deadline=None, complete=False)` | Returns a `Proposal` including staged publications and children |
+| `context.propose(state, incorporated=ids, deadline=None, complete=False, rebind=None)` | Returns a `Proposal` including staged publications and children; `rebind` hands the session to another bound definition |
 | `context.propose(state, incorporated=ids, deadline=None, complete=False)` | Returns a `Proposal` including the staged publications |
 
 Keys identify logical operations and must be stable across retries and unique

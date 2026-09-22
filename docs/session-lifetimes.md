@@ -117,6 +117,6 @@ policy layered above, per [conversation mailboxes](conversation-mailboxes.md).
 
 ## Not covered here
 
-Rebinding a long-lived session to a new definition version, session enumeration
-for eager start, lease renewal and attempt limits are separate items in
-[NOW.md](../NOW.md). Cross-shard keying needs qualified routes and an outbox.
+Rebinding a long-lived session to a new definition version is described in
+[session upgrades](session-upgrades.md); `list_sessions` provides enumeration.
+Lease renewal and attempt limits are separate items in [NOW.md](../NOW.md). Cross-shard keying needs qualified routes and an outbox.

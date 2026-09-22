@@ -17,9 +17,10 @@ does not assemble a checkpoint by independently writing a state store and queue.
 | `bind_definition(executable, contract)` | Persist a version's definition contract; identical rebinding succeeds, a changed contract is rejected |
 | `create(session_id, executable, state)` | Create a ready session; never overwrite an existing one |
 | `inspect(session_id)` | Observe saved state/status without claiming or consuming mail |
+| `list_sessions(executable=None, status=None, limit=None)` | Enumerate identity and lifecycle in creation order, without state, mail or claiming |
 | `append(session_id, event)` | Persist mail idempotently by destination and event ID |
 | `claim(lease_seconds=30, executable=None, max_events=None)` | Lease a ready session and return restored state plus an ordered input batch |
-| `commit(activation, state, incorporated=..., publish=..., deadline=None, complete=False, spawn=...)` | Atomically save state, incorporate inputs, create spawned children, publish within this domain, set the next wake and release the lease |
+| `commit(activation, state, incorporated=..., publish=..., deadline=None, complete=False, spawn=..., rebind=None)` | Atomically save state, incorporate inputs, create spawned children, publish within this domain, optionally rebind to another definition, set the next wake and release the lease |
 | `purge(completed_before=unix_time, limit=None)` | Delete complete sessions older than the cutoff with their retained inputs; return the count |
 
 All `claim` arguments are keyword-only. `commit` requires explicit incorporated
@@ -37,8 +38,12 @@ parent's later completion or purge propagates to them. Purge never touches
 nonterminal sessions or sessions with an unknown completion time, and it ends
 duplicate detection for the removed IDs. See [session lifetimes](session-lifetimes.md).
 
-`Activation`, `Publication`, `Spawn`, `SessionSnapshot`, `StaleActivation` and
-`SessionAlreadyExists` live with the interface. `Activation` is a runtime-held
+`rebind` moves the session to a different bound definition at this checkpoint,
+keeping its ID, revision history, retained input IDs and pending mail; it cannot
+accompany completion. See [session upgrades](session-upgrades.md).
+
+`Activation`, `Publication`, `Spawn`, `SessionSnapshot`, `SessionListing`,
+`StaleActivation` and `SessionAlreadyExists` live with the interface. `Activation` is a runtime-held
 snapshot with an opaque lease token, state, events and `has_more`; handlers receive
 copies without lease credentials. `SessionSnapshot` describes the existing
 dictionary returned by `inspect`: executable, state, status, deadline and revision.
@@ -83,7 +88,7 @@ worker = Dispatcher(backend)
 ```
 
 No driver registry, backend-selection YAML or network dependency is required for
-this extraction. A future Redis implementation must supply the same seven methods
+this extraction. A future Redis implementation must supply the same eight methods
 and guarantees, including server-side validation/commit fencing, namespace
 isolation, durable readiness and duplicate handling. The runner and executable
 contract can remain unchanged. Automatic launch can proceed against SQLite.
@@ -100,7 +105,8 @@ later work, alongside the [shard proposal](runner-shards.md).
 `make_session_backend` fixture in `tests/conftest.py`. It contains the original
 backend-independent lease/mail/checkpoint tests plus definition persistence,
 duplicate creation, detached observations, bounded-batch recovery, namespace
-isolation, atomic spawn with rollback, child independence and purge retention. Adding another adapter to that fixture runs the same assertions against
+isolation, atomic spawn with rollback, child independence, purge retention,
+enumeration and rebind. Adding another adapter to that fixture runs the same assertions against
 it. The fixture owns test namespaces and a controllable clock; those are not
 public interface methods.
 

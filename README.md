@@ -169,7 +169,9 @@ implementation, with a reusable conformance suite for future adapters.
 Session lifetime is an application decision, not a runtime one: ingress keying
 (per event, per conversation or singleton), parent-spawned task sessions and
 completed-session retention are described in
-[session lifetimes](docs/session-lifetimes.md).
+[session lifetimes](docs/session-lifetimes.md). Long-lived sessions move to a
+new definition version lazily at their next wake through declared upgrades; see
+[session upgrades](docs/session-upgrades.md).
 
 Start with the [registered example](examples/mailboxes/registered/README.md) for
 the current API. The other [mailbox examples](examples/mailboxes/README.md) retain

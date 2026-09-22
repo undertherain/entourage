@@ -5,7 +5,7 @@ proposals; only the dispatcher receives the store's activation/lease token.
 """
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import importlib
 import importlib.util
@@ -48,6 +48,15 @@ class Executable:
     config: dict = field(default_factory=dict)
     development: bool = False
     resources: tuple[Path, ...] = ()
+    upgrades: dict = field(default_factory=dict)
+    """Superseded definition -> migrate(context, state, mail) returning a Proposal.
+
+    The dispatcher serves ready sessions still bound to those definitions with
+    the migrate handler and rebinds them to this version at its checkpoint.
+    Migration runs lazily, at the session's next wake, which is the only time a
+    definition matters. Old code need not be loadable. Upgrade maps are not part
+    of the persisted contract; they describe how to leave old versions.
+    """
 
     def contract(self):
         if not isinstance(self.definition, str) or not all(self.definition.rpartition(":")[::2]):
@@ -60,6 +69,11 @@ class Executable:
             raise ValueError("development must be a boolean")
         if not isinstance(self.config, dict):
             raise ValueError("config must be a JSON object")
+        if not isinstance(self.upgrades, dict) or not all(
+                isinstance(old, str) and old and old != self.definition and callable(migrate)
+                and not inspect.iscoroutinefunction(migrate)
+                for old, migrate in self.upgrades.items()):
+            raise ValueError("upgrades map other definitions to synchronous callables")
         source = inspect.getsourcefile(self.resume)
         if not source and not self.development:
             raise ValueError("source unavailable; explicitly opt into development mode")
@@ -83,35 +97,49 @@ class Executable:
         path = Path(path).resolve()
         data = yaml.safe_load(path.read_text())
         allowed = {"definition", "protocol", "entrypoint", "state_schema", "inbox",
-                   "config", "development", "resources"}
+                   "config", "development", "resources", "upgrades"}
         if not isinstance(data, dict) or set(data) - allowed:
             raise ValueError("invalid manifest or unknown fields")
         if data.get("protocol") != PROTOCOL or data.get("inbox") != "session":
             raise ValueError("manifest requires entourage.activation/v1 and inbox: session")
-        entrypoint = data.get("entrypoint", "")
-        if not isinstance(entrypoint, str) or ":" not in entrypoint:
-            raise ValueError("entrypoint must be module:handler or file.py:handler")
-        module_name, attribute = entrypoint.rsplit(":", 1)
-        if module_name.endswith(".py"):
-            source = (path.parent / module_name).resolve()
+        resources = data.get("resources", [])
+        if not isinstance(resources, list) or not all(isinstance(p, str) for p in resources):
+            raise ValueError("resources must be a list of file paths")
+        upgrades = data.get("upgrades", {})
+        if not isinstance(upgrades, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in upgrades.items()):
+            raise ValueError("upgrades must map old definitions to entrypoints")
+        loaded = {}  # one execution per source file for this manifest load
+        definition = cls(data["definition"],
+                         _load_entrypoint(path, data.get("entrypoint", ""), loaded),
+                         state_schema=data.get("state_schema", 1),
+                         config=data.get("config", {}),
+                         development=data.get("development", False),
+                         resources=tuple(path.parent / p for p in resources),
+                         upgrades={old: _load_entrypoint(path, entry, loaded)
+                                   for old, entry in upgrades.items()})
+        definition.contract()
+        return definition
+
+
+def _load_entrypoint(manifest: Path, entrypoint, loaded: dict):
+    if not isinstance(entrypoint, str) or ":" not in entrypoint:
+        raise ValueError("entrypoint must be module:handler or file.py:handler")
+    module_name, attribute = entrypoint.rsplit(":", 1)
+    if module_name.endswith(".py"):
+        source = (manifest.parent / module_name).resolve()
+        if source not in loaded:
             name = "_entourage_executable_" + _identity(str(source))
             spec = importlib.util.spec_from_file_location(name, source)
             module = importlib.util.module_from_spec(spec)
             sys.modules[name] = module
             # Compile the current bytes: do not reuse stale same-second .pyc files.
             exec(compile(source.read_bytes(), str(source), "exec"), module.__dict__)
-        else:
-            module = importlib.import_module(module_name)
-        resources = data.get("resources", [])
-        if not isinstance(resources, list) or not all(isinstance(p, str) for p in resources):
-            raise ValueError("resources must be a list of file paths")
-        definition = cls(data["definition"], getattr(module, attribute),
-                         state_schema=data.get("state_schema", 1),
-                         config=data.get("config", {}),
-                         development=data.get("development", False),
-                         resources=tuple(path.parent / p for p in resources))
-        definition.contract()
-        return definition
+            loaded[source] = module
+        module = loaded[source]
+    else:
+        module = importlib.import_module(module_name)
+    return getattr(module, attribute)
 
 
 @dataclass(frozen=True)
@@ -122,14 +150,17 @@ class Proposal:
     deadline: Optional[float] = None
     complete: bool = False
     spawn: tuple[Spawn, ...] = ()
+    rebind: Optional[str] = None
 
 
 class Context:
     """Per-attempt metadata and staged local mail, with no commit capability."""
 
-    def __init__(self, session_id, definition, config, *, has_more=False):
+    def __init__(self, session_id, definition, config, *, has_more=False,
+                 upgrading_from=None):
         self.session_id = session_id
         self.definition = definition
+        self.upgrading_from = upgrading_from
         self.activation_id = uuid.uuid4().hex
         self.config = _json_copy(config)
         self.has_more = has_more
@@ -175,10 +206,12 @@ class Context:
         self._spawn.append(Spawn(child, definition, _json_copy(state)))
         return child
 
-    def propose(self, state, *, incorporated=(), deadline=None, complete=False):
+    def propose(self, state, *, incorporated=(), deadline=None, complete=False,
+                rebind=None):
+        """Stage the checkpoint; rebind hands the session to another definition."""
         return Proposal(_json_copy(state), tuple(incorporated),
                         tuple(deepcopy(self._publish)), deadline, complete,
-                        tuple(deepcopy(self._spawn)))
+                        tuple(deepcopy(self._spawn)), rebind)
 
 
 @dataclass(frozen=True)
@@ -212,14 +245,26 @@ class Dispatcher:
         self.max_events = max_events
         self.lease_seconds = lease_seconds
         self._definitions = {}
+        self._upgrades = {}
         self._cursor = 0
 
     def register(self, executable: Executable):
-        if executable.definition in self._definitions:
-            raise ValueError(f"duplicate definition {executable.definition!r}")
+        """Serve a definition, plus lazily migrate sessions it declares upgrades for.
+
+        A definition cannot be both served here and upgraded away by another
+        registration: that would make the old version's sessions ambiguous.
+        """
+        name = executable.definition
+        if name in self._definitions or name in self._upgrades:
+            raise ValueError(f"duplicate or superseded definition {name!r}")
+        for old in executable.upgrades:
+            if old in self._definitions or old in self._upgrades:
+                raise ValueError(f"definition {old!r} is already served or upgraded here")
         contract = executable.contract()
-        self.store.bind_definition(executable.definition, contract)
-        self._definitions[executable.definition] = (executable.resume, contract)
+        self.store.bind_definition(name, contract)
+        self._definitions[name] = (executable.resume, contract)
+        for old, migrate in executable.upgrades.items():
+            self._upgrades[old] = (migrate, name)
         return self
 
     def create(self, session_id, definition, state):
@@ -230,7 +275,7 @@ class Dispatcher:
         self.store.create(session_id, definition, _json_copy(state))
 
     def run_once(self):
-        names = list(self._definitions)
+        names = [*self._definitions, *self._upgrades]
         for offset in range(len(names)):
             index = (self._cursor + offset) % len(names)
             name = names[index]
@@ -239,10 +284,15 @@ class Dispatcher:
             if activation is None:
                 continue
             self._cursor = (index + 1) % len(names)
-            handler, contract = self._definitions[name]
+            if name in self._definitions:
+                handler, contract = self._definitions[name]
+                target, upgrading_from = None, None
+            else:
+                handler, target = self._upgrades[name]
+                contract, upgrading_from = self._definitions[target][1], name
             # Keep the original activation private and unchanged for commit validation.
-            context = Context(activation.session_id, name, contract["config"],
-                              has_more=activation.has_more)
+            context = Context(activation.session_id, target or name, contract["config"],
+                              has_more=activation.has_more, upgrading_from=upgrading_from)
             try:
                 proposal = handler(context, deepcopy(activation.state),
                                    deepcopy(activation.events))
@@ -250,11 +300,15 @@ class Dispatcher:
                     raise TypeError("resume must return a Proposal")
                 if not isinstance(proposal.state, dict) or type(proposal.complete) is not bool:
                     raise ValueError("proposal requires object state and boolean complete")
+                if target is not None:
+                    if proposal.rebind not in (None, target) or proposal.complete:
+                        raise ValueError(f"migration from {name!r} must rebind to {target!r}")
+                    proposal = replace(proposal, rebind=target)
                 self.store.commit(activation, _json_copy(proposal.state),
                                   incorporated=list(proposal.incorporated),
                                   publish=deepcopy(proposal.publish),
                                   deadline=proposal.deadline, complete=proposal.complete,
-                                  spawn=deepcopy(proposal.spawn))
+                                  spawn=deepcopy(proposal.spawn), rebind=proposal.rebind)
             except Exception as error:
                 return DispatchResult(activation.session_id, False, error)
             return DispatchResult(activation.session_id, True)

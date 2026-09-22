@@ -429,3 +429,89 @@ def test_repeated_logical_spawn_is_rejected_not_duplicated(runtime):
     assert store.inspect("concierge-main")["revision"] == 1
     assert store.inspect("concierge-main:research:1")["status"] == "complete"
     assert inputs(store, "concierge-main")[0]["event_id"] == "again"
+
+
+def test_superseded_sessions_migrate_lazily_on_next_wake(runtime):
+    store, now = runtime
+    served = []
+
+    def v1(ctx, state, mail):
+        served.append("v1")
+        return ctx.propose({"turns": state.get("turns", []) + [e["event_id"] for e in mail]},
+                           incorporated=[e["event_id"] for e in mail])
+
+    def migrate(ctx, state, mail):
+        served.append("migrate")
+        assert ctx.upgrading_from == "concierge:v1" and ctx.definition == "concierge:v2"
+        assert ctx.config == {"soul": "v2"}
+        # Compaction is the handoff: summarize, leave the new mail for v2 to handle.
+        return ctx.propose({"summary": ",".join(state["turns"]), "turns": []})
+
+    def v2(ctx, state, mail):
+        served.append("v2")
+        assert state == {"summary": "m1,m2", "turns": []}
+        return ctx.propose(state, incorporated=[e["event_id"] for e in mail])
+
+    old = Dispatcher(store).register(Executable("concierge:v1", v1))
+    old.create("main", "concierge:v1", {})
+    for event_id in ("m1", "m2"):
+        store.append("main", {"event_id": event_id})
+    assert old.run_once().committed
+    assert old.run_once() is None  # parked, quiet: no migration needed yet
+
+    new = Dispatcher(store).register(
+        Executable("concierge:v2", v2, config={"soul": "v2"}, upgrades={"concierge:v1": migrate}))
+    assert new.run_once() is None  # still parked: a superseded definition alone is not readiness
+    store.append("main", {"event_id": "m3"})
+    assert new.run_once().committed
+    assert store.inspect("main")["executable"] == "concierge:v2"
+    assert new.run_once().committed  # m3 was retained for v2
+    assert served == ["v1", "migrate", "v2"]
+    assert inputs(store, "main")[-1]["event_id"] == "m3"
+    listing = store.list_sessions(executable="concierge:v1")
+    assert listing == []
+
+
+def test_migration_must_rebind_to_its_target_and_old_versions_cannot_also_be_served(runtime):
+    store, _ = runtime
+
+    def handler(ctx, state, mail):
+        return ctx.propose(state, complete=True)
+
+    def wrong(ctx, state, mail):
+        return ctx.propose(state, rebind="elsewhere:v1")
+
+    store.bind_definition("elsewhere:v1", {})
+    dispatcher = Dispatcher(store).register(
+        Executable("a:v2", handler, upgrades={"a:v1": wrong}))
+    with pytest.raises(ValueError, match="superseded"):
+        dispatcher.register(Executable("a:v1", handler))
+    with pytest.raises(ValueError, match="already served or upgraded"):
+        dispatcher.register(Executable("b:v1", handler, upgrades={"a:v1": handler}))
+    with pytest.raises(ValueError, match="upgrades"):
+        Dispatcher(store).register(Executable("b:v1", handler, upgrades={"b:v1": handler}))
+    store.create("s", "a:v1", {})
+    result = dispatcher.run_once()
+    assert not result.committed and "must rebind" in str(result.error)
+    assert store.inspect("s")["executable"] == "a:v1"
+    with pytest.raises(ValueError, match="upgrades"):
+        Executable("c:v2", handler, upgrades={"c:v1": "not callable"}).contract()
+
+
+def test_manifest_upgrades_load_migrations_from_the_same_source(tmp_path):
+    (tmp_path / "agent.py").write_text(
+        "def resume(ctx, state, mail):\n    return ctx.propose(state)\n"
+        "def migrate(ctx, state, mail):\n    return ctx.propose({'from': ctx.upgrading_from})\n")
+    (tmp_path / "agent.yaml").write_text(
+        "definition: agent:v2\nprotocol: entourage.activation/v1\n"
+        "entrypoint: agent.py:resume\ninbox: session\n"
+        "upgrades:\n  agent:v1: agent.py:migrate\n")
+    executable = Executable.from_manifest(tmp_path / "agent.yaml")
+    assert set(executable.upgrades) == {"agent:v1"}
+    assert executable.upgrades["agent:v1"].__module__ == executable.resume.__module__
+    store = LocalSessions(tmp_path / "sessions.db")
+    dispatcher = Dispatcher(store).register(executable)
+    store.create("s", "agent:v1", {"legacy": True})
+    assert dispatcher.run_once().committed
+    assert store.inspect("s") == {"executable": "agent:v2", "state": {"from": "agent:v1"},
+                                  "status": "waiting", "deadline": None, "revision": 1}

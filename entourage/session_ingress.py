@@ -52,6 +52,27 @@ class Member:
             raise ValueError("session must be a nonempty string")
 
 
+def ensure_session(store: SessionBackend, session_id: str, definition: str,
+                   contract: dict, state: dict) -> bool:
+    """Create an explicitly addressed session unless it exists; return created.
+
+    For producers that name the session themselves rather than deriving it from a
+    keying policy. The definition is bound first, so a producer may create a
+    session before any worker for that definition has registered.
+    """
+    try:
+        store.inspect(session_id)
+        return False
+    except KeyError:
+        pass
+    store.bind_definition(definition, contract)
+    try:
+        store.create(session_id, definition, deepcopy(state))
+        return True
+    except SessionAlreadyExists:
+        return False
+
+
 @dataclass(frozen=True)
 class Delivery:
     session_id: str

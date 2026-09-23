@@ -62,6 +62,11 @@ class Member:
     lease: float = 300                 # worker-owned: step lock and hard limit
     max_attempts: int = 3              # worker-owned: attempts before failed
 
+    def executable(self):
+        """Load this member's versioned definition from its folder's agent.yaml."""
+        from .executables import Executable
+        return Executable.from_manifest(self.folder / "agent.yaml")
+
     def worker_args(self):
         args = ["--lease", str(self.lease), "--max-attempts", str(self.max_attempts)]
         if self.idle_exit is not None:

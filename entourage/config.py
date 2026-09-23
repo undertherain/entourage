@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
@@ -175,6 +176,9 @@ def load_agent_manifest(path: Path, environ: Mapping[str, str] = os.environ) -> 
     manifest_path = Path(path).resolve()
     with manifest_path.open(encoding="utf-8") as stream:
         document = yaml.safe_load(stream) or {}
+    # An agent folder is importable, so tool/setup references may name its local packages.
+    if str(manifest_path.parent) not in sys.path:
+        sys.path.insert(0, str(manifest_path.parent))
     raw = document.get("agent")
     if not isinstance(raw, Mapping):
         raise ValueError("manifest must contain an 'agent' mapping")

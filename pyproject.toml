@@ -34,3 +34,6 @@ dev = ["pytest"]
 [project.urls]
 "Homepage" = "https://github.com/example/entourage"
 "Bug Tracker" = "https://github.com/example/entourage/issues"
+
+[tool.setuptools.packages.find]
+include = ["entourage*"]

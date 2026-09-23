@@ -130,6 +130,10 @@ def _load_entrypoint(manifest: Path, entrypoint, loaded: dict):
     module_name, attribute = entrypoint.rsplit(":", 1)
     if module_name.endswith(".py"):
         source = (manifest.parent / module_name).resolve()
+        # An agent folder is importable: its entrypoint may import sibling packages.
+        folder = str(manifest.parent.resolve())
+        if folder not in sys.path:
+            sys.path.insert(0, folder)
         if source not in loaded:
             name = "_entourage_executable_" + _identity(str(source))
             spec = importlib.util.spec_from_file_location(name, source)

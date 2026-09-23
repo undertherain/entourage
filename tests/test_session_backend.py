@@ -184,7 +184,8 @@ def test_snapshot_and_activation_values_are_detached(sessions):
     store.append("trip", {"event_id": "input", "payload": {"value": 1}})
     observed = store.inspect("trip")
     assert observed == {"state": {"saved": [1]}, "executable": "travel:v1",
-                        "status": "ready", "deadline": None, "revision": 0}
+                        "status": "ready", "deadline": None, "revision": 0,
+                        "attempts": 0, "last_error": None}
     observed["state"]["saved"].append(2)
     activation = store.claim()
     assert activation.state == {"saved": [1]}
@@ -354,7 +355,8 @@ def test_list_sessions_enumerates_without_state_or_claiming(sessions):
     listing = store.list_sessions()
     assert [row["session_id"] for row in listing] == ["a", "b", "c"]
     assert listing[1] == {"session_id": "b", "executable": "concierge:v1",
-                          "status": "ready", "deadline": None, "revision": 0}
+                          "status": "ready", "deadline": None, "revision": 0,
+                          "attempts": 0, "worker": None, "lease_until": None}
     assert listing[0]["status"] == "complete" and listing[0]["revision"] == 2
     assert all("state" not in row for row in listing)
     assert [r["session_id"] for r in store.list_sessions(executable="travel:v1")] == ["a"]
@@ -401,3 +403,77 @@ def test_rebind_requires_bound_different_definition_and_no_completion(sessions):
     with pytest.raises(StaleActivation):
         store.commit(activation, {}, incorporated=[], rebind="concierge:v2")
     assert store.inspect("main")["executable"] == "travel:v1"
+
+
+def test_attempts_count_claims_until_commit_and_failed_parks_the_session(sessions):
+    store, now = sessions
+    store.create("trip", "travel:v1", {})
+    store.append("trip", mail("input"))
+    for attempt in (1, 2, 3):
+        activation = store.claim(lease_seconds=1, worker=f"w{attempt}", max_attempts=3)
+        assert activation.attempt == attempt
+        assert store.list_sessions()[0]["worker"] == f"w{attempt}"
+        now[0] += 1  # crash: nobody commits or releases
+    assert store.claim(max_attempts=3) is None
+    snapshot = store.inspect("trip")
+    assert snapshot["status"] == "failed" and snapshot["attempts"] == 3
+    assert store.list_sessions(status="failed")[0]["session_id"] == "trip"
+    assert store.list_sessions(ready=True) == []
+    assert store.append("trip", mail("while-failed")) is True  # mail is kept
+    assert store.claim() is None  # no limit given, still not served
+    assert store.retry("trip") is True and store.retry("trip") is False
+    resumed = store.claim(max_attempts=3)
+    assert resumed.attempt == 1 and resumed.last_error is None
+    assert [e["event_id"] for e in resumed.events] == ["input", "while-failed"]
+    store.commit(resumed, {}, incorporated=["input", "while-failed"])
+    assert store.inspect("trip")["attempts"] == 0
+    with pytest.raises(KeyError):
+        store.retry("missing")
+
+
+def test_release_keeps_attempt_records_error_and_backs_off(sessions):
+    store, now = sessions
+    park(store, state={"saved": True})
+    store.append("trip", mail("input"))
+    first = store.claim(worker="w1")
+    store.release(first, error="boom", retry_after=5)
+    with pytest.raises(StaleActivation):
+        store.commit(first, {}, incorporated=["input"])
+    snapshot = store.inspect("trip")
+    assert snapshot == {"executable": "travel:v1", "state": {"saved": True},
+                        "status": "waiting", "deadline": None, "revision": 1,
+                        "attempts": 1, "last_error": "boom"}
+    assert store.list_sessions()[0]["worker"] is None
+    assert store.claim() is None and store.list_sessions(ready=True) == []
+    now[0] += 5
+    second = store.claim(max_attempts=2)
+    assert second.attempt == 2 and second.last_error == "boom"
+    assert second.state == {"saved": True} and second.events == [mail("input")]
+    store.release(second)  # immediate retry, no error
+    with pytest.raises(StaleActivation):
+        store.release(second)
+    assert store.claim(max_attempts=2) is None
+    assert store.inspect("trip")["status"] == "failed"
+    assert store.inspect("trip")["last_error"] is None
+
+
+def test_ready_filter_matches_what_claim_would_take(sessions):
+    store, now = sessions
+    park(store, "quiet")
+    park(store, "mailed")
+    store.append("mailed", mail("m"))
+    park(store, "due", deadline=110)
+    park(store, "leased")
+    store.append("leased", mail("l"))
+    held = store.claim(session_id="leased", lease_seconds=100)
+    assert held.session_id == "leased"
+    store.create("new", "travel:v1", {})
+    ids = lambda **kw: [r["session_id"] for r in store.list_sessions(**kw)]
+    assert ids(ready=True) == ["mailed", "new"]
+    assert ids(ready=False) == ["quiet", "due", "leased"]
+    now[0] = 110
+    assert ids(ready=True) == ["mailed", "due", "new"]
+    assert store.claim(session_id="quiet") is None
+    assert store.claim(session_id="mailed").session_id == "mailed"
+    active = {r["session_id"]: r["lease_until"] for r in store.list_sessions(status="active")}
+    assert active == {"leased": 200, "mailed": 140}

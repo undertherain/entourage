@@ -171,7 +171,10 @@ Session lifetime is an application decision, not a runtime one: ingress keying
 completed-session retention are described in
 [session lifetimes](docs/session-lifetimes.md). Long-lived sessions move to a
 new definition version lazily at their next wake through declared upgrades; see
-[session upgrades](docs/session-upgrades.md).
+[session upgrades](docs/session-upgrades.md). A deployment runs its agents as a
+shard: worker processes or podman containers over one store, supervised by a
+runner that reads the store; see [deployment shards](docs/runner-shards.md) and
+the runnable [demo shard](examples/shard/shard.yaml).
 
 Start with the [registered example](examples/mailboxes/registered/README.md) for
 the current API. The other [mailbox examples](examples/mailboxes/README.md) retain

@@ -34,6 +34,8 @@ class Activation:
     state: dict
     events: list[dict]
     has_more: bool = False
+    attempt: int = 1
+    last_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -53,14 +55,19 @@ class Spawn:
     state: dict
 
 
+Status = Literal["ready", "active", "waiting", "complete", "failed"]
+
+
 class SessionSnapshot(TypedDict):
     """Detached observation of persisted state; reading does not consume mail."""
 
     executable: str
     state: dict
-    status: Literal["ready", "active", "waiting", "complete"]
+    status: Status
     deadline: Optional[float]
     revision: int
+    attempts: int
+    last_error: Optional[str]
 
 
 class SessionListing(TypedDict):
@@ -68,9 +75,12 @@ class SessionListing(TypedDict):
 
     session_id: str
     executable: str
-    status: Literal["ready", "active", "waiting", "complete"]
+    status: Status
     deadline: Optional[float]
     revision: int
+    attempts: int
+    worker: Optional[str]
+    lease_until: Optional[float]
 
 
 class SessionBackend(ABC):
@@ -116,14 +126,16 @@ class SessionBackend(ABC):
 
     @abstractmethod
     def list_sessions(self, *, executable: Optional[str] = None,
-                      status: Optional[str] = None,
+                      status: Optional[str] = None, ready: Optional[bool] = None,
                       limit: Optional[int] = None) -> list[SessionListing]:
         """Enumerate sessions in creation order, optionally filtered.
 
         Do not load state or mail, claim anything or change readiness. Complete
-        sessions are included unless filtered out. A runner uses this to warm
-        eager sessions, find sessions bound to superseded definitions and
-        reconcile after restart; it is an observation, not a scheduling query.
+        and failed sessions are included unless filtered out. ready=True keeps
+        only sessions a claim could take now; ready=False keeps the others.
+        worker and lease_until describe the current holder of a claim, if any.
+        A runner uses this to start workers for ready work, find stuck holders,
+        find superseded definitions and reconcile after restart.
         """
 
     @abstractmethod
@@ -140,13 +152,23 @@ class SessionBackend(ABC):
     @abstractmethod
     def claim(self, *, lease_seconds: float = 30,
               executable: Optional[str] = None,
-              max_events: Optional[int] = None) -> Optional[Activation]:
+              max_events: Optional[int] = None,
+              session_id: Optional[str] = None,
+              worker: Optional[str] = None,
+              max_attempts: Optional[int] = None) -> Optional[Activation]:
         """Atomically lease one ready session, or return None.
 
         New sessions, pending mail, due deadlines and expired attempts are ready.
-        Honor the optional definition filter, exclude complete sessions and
-        unexpired leases, and prevent starvation by rotating eligible sessions.
-        No session may have two currently valid lease tokens.
+        Honor the optional definition and session filters, exclude complete,
+        failed and unexpired-lease sessions, and prevent starvation by rotating
+        eligible sessions. No session may have two currently valid lease tokens.
+
+        Every claim counts one attempt; a successful commit resets the count.
+        The activation reports its attempt number and the error recorded by the
+        previous release, if any. With max_attempts, a ready session whose count
+        already reached it is moved to status 'failed' instead of being leased,
+        durably and within this call, and the search continues. worker records
+        who holds the lease, for operators and supervisors; it grants nothing.
 
         lease_seconds is finite and positive; max_events is a positive integer
         or None (unbounded). Deliver pending inputs in accepted append order.
@@ -187,6 +209,26 @@ class SessionBackend(ABC):
         any remaining mail, including arrivals after claim or self-publications.
         Unincorporated mail stays ready. Parking does not cancel outstanding work.
         A repeated commit with the same token is stale, not a second transition.
+        """
+
+    @abstractmethod
+    def release(self, activation: Activation, *, error: Optional[str] = None,
+                retry_after: Optional[float] = None) -> None:
+        """Give up this attempt without a checkpoint; the attempt stays counted.
+
+        Raise StaleActivation if the token no longer holds the lease. Record the
+        error text for the next attempt and operators. With retry_after, the
+        session is not claimable again for that many seconds; otherwise it is
+        ready immediately. State, mail and revision are untouched.
+        """
+
+    @abstractmethod
+    def retry(self, session_id: str) -> bool:
+        """Return a failed session to service with a zero attempt count.
+
+        Return False, changing nothing, when the session is not failed. Mail
+        accepted while failed remains pending, so the session is typically ready
+        at once. Raise KeyError for an unknown session.
         """
 
     @abstractmethod

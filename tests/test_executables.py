@@ -514,4 +514,74 @@ def test_manifest_upgrades_load_migrations_from_the_same_source(tmp_path):
     store.create("s", "agent:v1", {"legacy": True})
     assert dispatcher.run_once().committed
     assert store.inspect("s") == {"executable": "agent:v2", "state": {"from": "agent:v1"},
-                                  "status": "waiting", "deadline": None, "revision": 1}
+                                  "status": "waiting", "deadline": None, "revision": 1,
+                                  "attempts": 0, "last_error": None}
+
+
+def test_failed_step_is_released_with_error_backoff_and_attempt_passed_to_agent(runtime):
+    store, now = runtime
+    seen = []
+
+    def resume(ctx, state, mail):
+        seen.append((ctx.attempt, ctx.last_error))
+        if ctx.attempt < 3:
+            raise RuntimeError(f"try {ctx.attempt}")
+        return ctx.propose({"took": ctx.attempt}, incorporated=[e["event_id"] for e in mail])
+
+    dispatcher = Dispatcher(store, lease_seconds=30, max_attempts=3, worker="w")
+    dispatcher.register(Executable("agent:v1", resume))
+    dispatcher.create("s", "agent:v1", {})
+    store.append("s", {"event_id": "m"})
+    first = dispatcher.run_once()
+    assert not first.committed and "try 1" in str(first.error)
+    snapshot = store.inspect("s")
+    assert snapshot["attempts"] == 1 and "try 1" in snapshot["last_error"]
+    assert store.list_sessions()[0]["worker"] is None  # released, not held to expiry
+    assert dispatcher.run_once() is None  # backoff of one second
+    now[0] += 1
+    assert not dispatcher.run_once().committed
+    assert dispatcher.run_once() is None  # backoff of two seconds
+    now[0] += 2
+    assert dispatcher.run_once().committed
+    assert seen == [(1, None), (2, "RuntimeError('try 1')"), (3, "RuntimeError('try 2')")]
+    assert store.inspect("s")["state"] == {"took": 3}
+
+
+def test_poison_session_is_parked_failed_and_others_keep_running(runtime):
+    store, now = runtime
+
+    def resume(ctx, state, mail):
+        if ctx.session_id == "poison":
+            raise RuntimeError("always")
+        return ctx.propose(state, incorporated=[e["event_id"] for e in mail])
+
+    dispatcher = Dispatcher(store, max_attempts=2, worker="w")
+    dispatcher.register(Executable("agent:v1", resume), lease_seconds=5)
+    for name in ("poison", "healthy"):
+        dispatcher.create(name, "agent:v1", {})
+    results = []
+    for _ in range(6):
+        results.extend(dispatcher.run_until_idle())
+        now[0] += 5
+    outcomes = {(r.session_id, r.committed) for r in results}
+    assert outcomes == {("poison", False), ("healthy", True)}
+    assert sum(r.session_id == "poison" for r in results) == 2
+    assert store.inspect("poison")["status"] == "failed"
+    assert store.list_sessions(status="active") == []
+
+
+def test_resident_loop_exits_after_idle_grace(runtime):
+    store, now = runtime
+    dispatcher = Dispatcher(store).register(
+        Executable("agent:v1", lambda ctx, state, mail: ctx.propose(state)))
+    dispatcher.create("s", "agent:v1", {})
+    stop = Event()
+    ticks = []
+
+    def sleep(seconds):
+        ticks.append(seconds)
+        now[0] += seconds
+
+    dispatcher.run_forever(stop, poll_interval=0.5, idle_exit=2, sleep=sleep)
+    assert store.inspect("s")["revision"] == 1
+    assert 1.5 <= sum(ticks) <= 2.5 and not stop.is_set()

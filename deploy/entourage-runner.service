@@ -1,0 +1,22 @@
+# User service for one shard runner on the host; workers run as podman containers.
+#   cp deploy/entourage-runner.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now entourage-runner
+#   loginctl enable-linger $USER   # keep it running without a login session
+[Unit]
+Description=Entourage shard runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/shards/second-brain
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/shards/second-brain/.env
+ExecStart=%h/.venvs/entourage/bin/python -m entourage.runner shard.yaml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

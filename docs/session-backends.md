@@ -17,9 +17,11 @@ does not assemble a checkpoint by independently writing a state store and queue.
 | `bind_definition(executable, contract)` | Persist a version's definition contract; identical rebinding succeeds, a changed contract is rejected |
 | `create(session_id, executable, state)` | Create a ready session; never overwrite an existing one |
 | `inspect(session_id)` | Observe saved state/status without claiming or consuming mail |
-| `list_sessions(executable=None, status=None, limit=None)` | Enumerate identity and lifecycle in creation order, without state, mail or claiming |
+| `list_sessions(executable=None, status=None, ready=None, limit=None)` | Enumerate identity, lifecycle, attempts and lease holder in creation order, without state, mail or claiming |
 | `append(session_id, event)` | Persist mail idempotently by destination and event ID |
-| `claim(lease_seconds=30, executable=None, max_events=None)` | Lease a ready session and return restored state plus an ordered input batch |
+| `claim(lease_seconds=30, executable=None, max_events=None, session_id=None, worker=None, max_attempts=None)` | Lease a ready session and return restored state plus an ordered input batch; counts one attempt, parks sessions at `max_attempts` as failed |
+| `release(activation, error=None, retry_after=None)` | Give the step back without a checkpoint; the attempt stays counted, the error is recorded, the session waits `retry_after` seconds |
+| `retry(session_id)` | Return a failed session to service with a zero attempt count |
 | `commit(activation, state, incorporated=..., publish=..., deadline=None, complete=False, spawn=..., rebind=None)` | Atomically save state, incorporate inputs, create spawned children, publish within this domain, optionally rebind to another definition, set the next wake and release the lease |
 | `purge(completed_before=unix_time, limit=None)` | Delete complete sessions older than the cutoff with their retained inputs; return the count |
 
@@ -37,6 +39,15 @@ checkpoint rolls back. Children are independent afterwards: nothing about the
 parent's later completion or purge propagates to them. Purge never touches
 nonterminal sessions or sessions with an unknown completion time, and it ends
 duplicate detection for the removed IDs. See [session lifetimes](session-lifetimes.md).
+
+Every claim counts an attempt and a commit resets the count; a release keeps
+it. With `max_attempts`, a ready session already at the limit is moved to status
+`failed` inside the claim and skipped. Failed sessions accept mail, are never
+claimed or purged, and return through `retry`. `Activation.attempt` and
+`Activation.last_error` tell the next attempt what happened. `worker` on a
+claim is recorded for supervisors and grants nothing. `ready=True` in
+`list_sessions` is exactly what a claim could take now. See
+[deployment shards](runner-shards.md).
 
 `rebind` moves the session to a different bound definition at this checkpoint,
 keeping its ID, revision history, retained input IDs and pending mail; it cannot
@@ -88,7 +99,7 @@ worker = Dispatcher(backend)
 ```
 
 No driver registry, backend-selection YAML or network dependency is required for
-this extraction. A future Redis implementation must supply the same eight methods
+this extraction. A future Redis implementation must supply the same ten methods
 and guarantees, including server-side validation/commit fencing, namespace
 isolation, durable readiness and duplicate handling. The runner and executable
 contract can remain unchanged. Automatic launch can proceed against SQLite.
@@ -106,7 +117,7 @@ later work, alongside the [shard proposal](runner-shards.md).
 backend-independent lease/mail/checkpoint tests plus definition persistence,
 duplicate creation, detached observations, bounded-batch recovery, namespace
 isolation, atomic spawn with rollback, child independence, purge retention,
-enumeration and rebind. Adding another adapter to that fixture runs the same assertions against
+enumeration, rebind, attempt counting, release and retry. Adding another adapter to that fixture runs the same assertions against
 it. The fixture owns test namespaces and a controllable clock; those are not
 public interface methods.
 

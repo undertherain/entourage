@@ -96,8 +96,8 @@ lease expiry. Two consequences for authors:
 - A child that must survive its parent's closure should send results to a
   singleton, not to the parent.
 
-The missing attempt limit turns the rejected reply into indefinite retries; that
-is the dead-letter item in [NOW.md](../NOW.md), not a keying problem.
+After `max_attempts` such rejections the child is parked as `failed` and the
+runner reports it; see [deployment shards](runner-shards.md).
 
 ## Retention
 

@@ -1,0 +1,4 @@
+definition: echo:v1
+protocol: entourage.activation/v1
+entrypoint: agent.py:resume
+inbox: session

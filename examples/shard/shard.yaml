@@ -1,0 +1,14 @@
+# Runnable with plain subprocesses:  python -m entourage.runner examples/shard/shard.yaml
+# Switch launcher to podman after:   podman build -t localhost/entourage-runtime .
+shard: demo
+store: state/sessions.db
+pool: 2
+notify: ops
+launcher: {kind: process}
+# launcher: {kind: podman, image: localhost/entourage-runtime, env: [OPENAI_API_KEY]}
+
+executables:
+  echo:
+    folder: ./echo
+    runner: {start: on_demand, parallel: 2}
+    worker: {idle_exit: 10, lease: 30, max_attempts: 3}

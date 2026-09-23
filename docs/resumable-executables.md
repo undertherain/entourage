@@ -160,7 +160,7 @@ versions are left for another worker; duplicate local registration is rejected.
 
 Handlers receive a fresh `Context`, a copied state dictionary and copied mail.
 Context exposes `session_id`, `definition`, per-attempt `activation_id`, `config`,
-`has_more` and, during a migration, `upgrading_from`. Its helpers stage effects; they do not send or commit immediately:
+`has_more`, `attempt`, `last_error` and, during a migration, `upgrading_from`. Its helpers stage effects; they do not send or commit immediately:
 
 | Helper | Result |
 | --- | --- |
@@ -199,13 +199,19 @@ rotates between its definitions. This is basic local fairness, not worker-pool
 admission, priorities or reserved capacity.
 
 Handler errors, invalid proposals and expired-lease commits return a failed result
-and leave the previous checkpoint and unincorporated mail intact. Infrastructure
-errors can have an unknown commit outcome; `committed=False` means success was
-not confirmed, and recovery follows durable state and leases. After an uncommitted
-lease expires another attempt can run. There is no attempt limit, lease renewal or
-dead-letter policy yet. A slow or stuck Python call cannot be killed by this
+and leave the previous checkpoint and unincorporated mail intact. A failed step is
+released immediately with its error text and a backoff that doubles per attempt
+up to the lease length; the next attempt sees `context.attempt` and
+`context.last_error`. Infrastructure errors can have an unknown commit outcome;
+`committed=False` means success was not confirmed, and recovery follows durable
+state and leases. A crashed worker cannot release, so its lease expires instead:
+`lease_seconds` is both the crash-detection delay and the hard limit of one step.
+The store parks a session as `failed` once `max_attempts` claims produced no
+commit; `Dispatcher(max_attempts=3)` with per-definition overrides on `register`.
+There is no lease renewal. A slow or stuck Python call cannot be killed by this
 adapter; the lease fences its eventual commit but does not stop computation or
-undo direct external effects. Event-count and dispatch-count budgets do not
+undo direct external effects. `run_forever(idle_exit=seconds)` returns after that
+long without a claim, which is how a worker process decides to exit. Event-count and dispatch-count budgets do not
 bound payload bytes, memory or handler wall time. Use idempotency/reconciliation
 for effects performed outside staged local mail.
 

@@ -16,8 +16,8 @@ release, resident processes, and an idle grace period (for example 10 seconds).
 Process residency does not retain a session write lease. Packaging/backend and
 protocol proposals: [executable lifecycle review](docs/executable-lifecycle.md).
 
-User refinement (2026-09-22): a deployment owns a named **shard** of cooperating
-agents and its own supervised runner, with no global runner dependency. Second
+User refinement (2026-09-22, built 2026-09-23): a deployment owns a named **shard**
+of cooperating agents and its own supervised runner, with no global runner dependency. Second
 Brain can be one shard. Agent processes can be eager/resident or launched on
 demand with release or idle grace (for example Events staying warm for ten minutes).
 Service bindings let an independently managed NAS OCR endpoint stay running.
@@ -52,6 +52,20 @@ subprocess recovery tests remain separate. Focused validation: **36 passed**.
 Full repository regression: **239 passed, 132 skipped**.
 See [session backends](docs/session-backends.md). Redis remains unimplemented for
 this core; automatic launch can build against the SQLite adapter.
+
+**Shard runner and workers (2026-09-23):** the store is the protocol. A worker
+(`python -m entourage.worker`) is the dispatcher over one agent folder; it
+records its name on leases and decides its own exit after `idle_exit`. The
+runner (`python -m entourage.runner shard.yaml`) reads the store and manages
+processes through a process or podman launcher: eager and on-demand starts
+with reserved and pooled capacity, backoff after quick exits, killing live
+holders of expired leases, and failure notices as mail. The store counts
+attempts per step, parks sessions as `failed` at `max_attempts`, and a failed
+step is released at once with its error and backoff; `context.attempt` and
+`context.last_error` reach the agent. No lease renewal: the lease is the hard
+step limit. `Containerfile` builds the generic runtime image; agent folders are
+mounted. See [deployment shards](docs/runner-shards.md). Focused validation:
+**65 passed** across backend, executable, ingress, SQLite and runner suites.
 
 **Session upgrades and enumeration (2026-09-22):** `commit(rebind=...)` moves a
 session to another bound definition at its checkpoint, keeping ID, history,
@@ -101,25 +115,22 @@ Current API and limits: [resumable executable contract](docs/resumable-executabl
 Consumer acceptance: [Second Brain mailbox-agent TODO](TODO.md#next-consumer-state-resumable-mailbox-agents-2026-09-22).
 Second Brain migration has not been performed. Broader milestones remain:
 
-The next automatic-launch slice follows the [shard proposal](docs/runner-shards.md#next-implementation-slice):
-deployment composition and residency over the subprocess adapter. It remains
-design work; the current dispatcher has no shard loader or process supervisor.
+Automatic launch is built as the [shard runner](docs/runner-shards.md). Next:
+runner ownership lease, container resource limits from the manifest, the
+Second Brain shard itself.
 
 1. Extend the local versioned registration/handler contract into a serialized
    activation/result protocol and reproducible executable packaging. Keep the
    runtime-owned commit boundary and separate definition/session/activation IDs.
-2. Add a subprocess execution adapter: registered argv/cwd, serialized input/output,
-   bounded execution, error handling and lease-expiry behavior. Allow repeated
-   activation/commit exchanges so resident and grace policies fit the same protocol.
-   Process success
-   alone must not mean checkpoint success. Reuse the launcher for one original
-   graph node before building a separate worker-management system.
+2. Done as worker processes sharing the store (no step protocol). Remaining:
+   reuse the worker for one original graph node before building a separate
+   graph worker manager.
 3. Atomic child creation is done (`Context.spawn`, derived names). Remaining:
    durable exchange/reply handles and the demonstration of two travel sessions
    sharing code: delegate tour, ask user, persist and exit, answer, resume child,
    return mock confirmation.
-4. Establish shared scheduling admission and bounded batches. Then add fairness,
-   priorities and reserved/borrowable capacity with explicit starvation policy.
+4. Reserved and pooled capacity exist per shard. Remaining: priorities and
+   cross-member fairness beyond claim rotation.
 5. Add Astral through a transactional outbox and replay-safe operation identities.
    Preserve working local and graph consumers; no second checkpoint transaction
    beside an existing graph commit for the same logical operation.
@@ -145,10 +156,10 @@ the registered CLI can inspect saved state without loading executable source.
 
 ## Open / not implemented
 
-Executable deployment, subprocess management, runtime-managed exchange tracking,
-worker pools, lease renewal, hard execution/memory/payload-byte limits, purge
+Runner ownership lease, lease renewal, memory/payload-byte limits, purge
 scheduling, runner-driven upgrade of quiet eager sessions, adoptable prompt
-resources outside the code identity, graph integration and Astral delivery. Pending requests are
+resources outside the code identity, runtime-managed exchange tracking, graph
+integration and Astral delivery. Pending requests are
 currently explicit application state. Exceptions retry after lease expiry with no
 attempt limit; no terminal failure/dead-letter policy exists yet. Handlers have an
 optional ordinary Python phase router; arbitrary coroutine stacks are not

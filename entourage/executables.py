@@ -13,7 +13,9 @@ import inspect
 import json
 import logging
 import math
+import os
 from pathlib import Path
+import socket
 import sys
 from threading import Event
 from typing import Callable, Optional
@@ -157,10 +159,14 @@ class Context:
     """Per-attempt metadata and staged local mail, with no commit capability."""
 
     def __init__(self, session_id, definition, config, *, has_more=False,
-                 upgrading_from=None):
+                 upgrading_from=None, attempt=1, last_error=None):
         self.session_id = session_id
         self.definition = definition
         self.upgrading_from = upgrading_from
+        self.attempt = attempt
+        """1 for a fresh step; higher means earlier attempts at this same step failed."""
+        self.last_error = last_error
+        """Error text recorded when the previous attempt released; None after a crash."""
         self.activation_id = uuid.uuid4().hex
         self.config = _json_copy(config)
         self.has_more = has_more
@@ -230,31 +236,47 @@ class DispatchResult:
 class Dispatcher:
     """Restore, invoke, validate and commit one bounded mail batch at a time.
 
-    Handler/validation failures leave the checkpoint untouched; retry becomes
-    eligible after lease expiry. Infrastructure failures may have an unknown
-    commit outcome. There is no attempt limit or lease renewal yet.
-    A blocked Python call cannot be killed here; process isolation is a follow-on.
+    A failed step is released at once with its error and an exponential backoff;
+    the store counts attempts and parks the session as failed at max_attempts.
+    A crashed worker cannot release, so its lease expires instead: lease_seconds
+    is both the crash-detection delay and the hard limit of one step. There is
+    no lease renewal. A blocked Python call cannot be killed here; the runner
+    kills the worker process once execution moves out of process.
     """
 
-    def __init__(self, store: SessionBackend, *, max_events=64, lease_seconds=30):
+    def __init__(self, store: SessionBackend, *, max_events=64, lease_seconds=30,
+                 max_attempts=3, worker=None, session=None):
         if type(max_events) is not int or max_events < 1:
             raise ValueError("max_events must be a positive integer")
         if not math.isfinite(lease_seconds) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be finite and positive")
+        if max_attempts is not None and (type(max_attempts) is not int or max_attempts < 1):
+            raise ValueError("max_attempts must be a positive integer or None")
         self.store = store
         self.max_events = max_events
         self.lease_seconds = lease_seconds
+        self.max_attempts = max_attempts
+        self.worker = worker or f"{socket.gethostname()}:{os.getpid()}"
+        self.session = session
+        """When set, this dispatcher serves only that session (a pinned worker)."""
         self._definitions = {}
         self._upgrades = {}
+        self._policies = {}
         self._cursor = 0
 
-    def register(self, executable: Executable):
+    def register(self, executable: Executable, *, lease_seconds=None, max_attempts=None):
         """Serve a definition, plus lazily migrate sessions it declares upgrades for.
 
+        lease_seconds and max_attempts override the dispatcher defaults for this
+        definition; they are deployment policy and not part of its contract.
         A definition cannot be both served here and upgraded away by another
         registration: that would make the old version's sessions ambiguous.
         """
         name = executable.definition
+        if lease_seconds is not None and (not math.isfinite(lease_seconds) or lease_seconds <= 0):
+            raise ValueError("lease_seconds must be finite and positive")
+        if max_attempts is not None and (type(max_attempts) is not int or max_attempts < 1):
+            raise ValueError("max_attempts must be a positive integer")
         if name in self._definitions or name in self._upgrades:
             raise ValueError(f"duplicate or superseded definition {name!r}")
         for old in executable.upgrades:
@@ -265,7 +287,17 @@ class Dispatcher:
         self._definitions[name] = (executable.resume, contract)
         for old, migrate in executable.upgrades.items():
             self._upgrades[old] = (migrate, name)
+        self._policies[name] = (lease_seconds or self.lease_seconds,
+                                self.max_attempts if max_attempts is None else max_attempts)
         return self
+
+    def _policy(self, name):
+        return self._policies[name if name in self._definitions else self._upgrades[name][1]]
+
+    @property
+    def definitions(self):
+        """Definitions served here, including those being upgraded away."""
+        return (*self._definitions, *self._upgrades)
 
     def create(self, session_id, definition, state):
         if definition not in self._definitions:
@@ -279,8 +311,10 @@ class Dispatcher:
         for offset in range(len(names)):
             index = (self._cursor + offset) % len(names)
             name = names[index]
+            lease_seconds, max_attempts = self._policy(name)
             activation = self.store.claim(executable=name, max_events=self.max_events,
-                                          lease_seconds=self.lease_seconds)
+                                          lease_seconds=lease_seconds, worker=self.worker,
+                                          session_id=self.session, max_attempts=max_attempts)
             if activation is None:
                 continue
             self._cursor = (index + 1) % len(names)
@@ -292,7 +326,8 @@ class Dispatcher:
                 contract, upgrading_from = self._definitions[target][1], name
             # Keep the original activation private and unchanged for commit validation.
             context = Context(activation.session_id, target or name, contract["config"],
-                              has_more=activation.has_more, upgrading_from=upgrading_from)
+                              has_more=activation.has_more, upgrading_from=upgrading_from,
+                              attempt=activation.attempt, last_error=activation.last_error)
             try:
                 proposal = handler(context, deepcopy(activation.state),
                                    deepcopy(activation.events))
@@ -310,9 +345,22 @@ class Dispatcher:
                                   deadline=proposal.deadline, complete=proposal.complete,
                                   spawn=deepcopy(proposal.spawn), rebind=proposal.rebind)
             except Exception as error:
+                self._release(activation, error, lease_seconds)
                 return DispatchResult(activation.session_id, False, error)
             return DispatchResult(activation.session_id, True)
         return None
+
+    def _release(self, activation, error, lease_seconds):
+        """Give the step back now rather than holding the lease to expiry.
+
+        Backoff doubles per attempt and never exceeds the lease. A release that
+        fails (stale lease, store unreachable) is logged; expiry still applies.
+        """
+        backoff = min(lease_seconds, float(2 ** (activation.attempt - 1)))
+        try:
+            self.store.release(activation, error=repr(error)[:2000], retry_after=backoff)
+        except Exception as release_error:  # noqa: BLE001 - never mask the step's error
+            log.warning("Could not release %s: %s", activation.session_id, release_error)
 
     def run_until_idle(self, *, max_activations=100):
         """Drain ready work within a budget; failures are returned for inspection."""
@@ -326,16 +374,30 @@ class Dispatcher:
             results.append(result)
         return results
 
-    def run_forever(self, stop: Event, *, poll_interval=0.1, on_result=None):
-        """Resident polling, interruptible while idle; no lease is held while waiting."""
+    def run_forever(self, stop: Event, *, poll_interval=0.1, on_result=None,
+                    idle_exit=None, sleep=None):
+        """Resident polling; returns on stop, or after idle_exit seconds without a claim.
+
+        No lease is held while waiting. The worker decides its own exit: a
+        supervisor only needs to notice that the process ended. A step claimed
+        just before the idle limit still runs to its commit or release.
+        """
         if not math.isfinite(poll_interval) or poll_interval <= 0:
             raise ValueError("poll_interval must be finite and positive")
+        if idle_exit is not None and (not math.isfinite(idle_exit) or idle_exit < 0):
+            raise ValueError("idle_exit must be finite and nonnegative")
+        sleep = sleep or stop.wait
+        idle = 0.0
         while not stop.is_set():
             result = self.run_once()
             if result is not None:
+                idle = 0.0
                 if on_result is not None:
                     on_result(result)
                 elif not result.committed:
                     log.error("Activation failed for %s: %s", result.session_id, result.error)
             if result is None or not result.committed:
-                stop.wait(poll_interval)
+                if result is None and idle_exit is not None and idle >= idle_exit:
+                    return
+                sleep(poll_interval)
+                idle += poll_interval

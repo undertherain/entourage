@@ -1,5 +1,9 @@
 # Shared execution runtime — implementation handoff
 
+> **Status 2026-10-05:** the graph runtime this document describes is retired;
+> the session core is the only scheduler. Kept as design history. See
+> [mailbox-first scheduling](mailbox-first-scheduling.md).
+
 2026-09-09. Entourage-owned implementation synthesis of the IOA discussion. This
 file and [NOW.md](../NOW.md) track implementation here; IOA retains the cross-project
 architecture decision and historical discussion. No production migration is claimed.

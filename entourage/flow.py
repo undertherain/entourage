@@ -1,3 +1,9 @@
+
+"""Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md."""
+
+import warnings as _warnings
+
+_warnings.warn("entourage.flow: Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.", DeprecationWarning, stacklevel=2)
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 NodeFn = Callable[

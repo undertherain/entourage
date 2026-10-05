@@ -1,12 +1,9 @@
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
 from entourage.mailbox import InMemoryMailbox
-import examples.mailbox_cli as mailbox_cli
-from examples.mailbox_cli import generate_reply, model_messages, parse_input
 
 
 def test_append_is_idempotent_and_claims_in_order():
@@ -113,63 +110,3 @@ def test_wait_for_any_conversation():
     mailbox.append("chat-b", {"content": "ready"})
 
     assert mailbox.wait_for_events(timeout=0) is True
-
-
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("hello", ("user", "hello")),
-        ("/subagent found it", ("subagent", "found it")),
-        ("/ambient elevated errors", ("ambient", "elevated errors")),
-    ],
-)
-def test_cli_input_kinds(text, expected):
-    assert parse_input(text) == expected
-
-
-def test_cli_preserves_typed_event_roles_for_the_model():
-    assert model_messages(
-        [
-            {"kind": "user", "content": "question"},
-            {"kind": "ambient", "content": "Grafana summary"},
-            {"kind": "subagent", "content": "investigation update"},
-        ]
-    ) == [
-        {"role": "user", "content": "question"},
-        {"role": "system", "content": "[ambient update]\nGrafana summary"},
-        {"role": "system", "content": "[subagent update]\ninvestigation update"},
-    ]
-
-
-def test_cli_generates_reply_with_configured_model(monkeypatch):
-    captured = {}
-
-    def fake_completion(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="four"))]
-        )
-
-    monkeypatch.setattr(mailbox_cli, "completion", fake_completion)
-
-    assert generate_reply("tiny/model", [{"role": "user", "content": "2+2?"}]) == "four"
-    assert captured["model"] == "tiny/model"
-    assert captured["messages"][-1] == {"role": "user", "content": "2+2?"}
-    assert "max_tokens" not in captured
-
-
-def test_cli_rejects_empty_model_output(monkeypatch):
-    monkeypatch.setattr(
-        mailbox_cli,
-        "completion",
-        lambda **_kwargs: SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content=None), finish_reason="length"
-                )
-            ]
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="finish_reason=length"):
-        generate_reply("tiny/model", [{"role": "user", "content": "hello"}])

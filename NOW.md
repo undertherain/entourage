@@ -12,12 +12,13 @@ and publication history; its July “current direction” is not the current bui
 is retired in five steps, each a commit with its own proof. No backend changes:
 exchanges and strict joins are handler-side state, one activation per node by
 default, the plan helper is deferred until a consumer needs runtime splicing.
-Progress: steps 1 to 4 done (`entourage/turn.py`, `entourage/exchanges.py`,
-`runner.notify_failures`, `SessionIngress.ensure`; all standalone examples
-except `mailbox_cli.py` run on the dispatcher; the Telegram demo carries both
-triage shapes, phase and per-event session, to see which sticks); step 5
-(retire) next. Second Brain still imports the graph runtime, so step 5 keeps
-import paths. The earlier
+All five steps are done (2026-10-05): `entourage/turn.py`,
+`entourage/exchanges.py`, `runner.notify_failures`, `SessionIngress.ensure`;
+every example runs on the dispatcher (the Telegram demo carries both triage
+shapes, phase and per-event session, to see which sticks); the graph modules
+are deprecated in place because Second Brain still imports them. Remaining:
+port Second Brain's graph consumers, then move the graph modules to `legacy/`
+and delete them. The earlier
 direction below stays as history; its item 2 is superseded.
 
 Entourage owns a graph-independent execution core shared by graph workflows and
@@ -172,9 +173,10 @@ the registered CLI can inspect saved state without loading executable source.
 
 Runner ownership lease, lease renewal, memory/payload-byte limits, purge
 scheduling, runner-driven upgrade of quiet eager sessions, adoptable prompt
-resources outside the code identity, runtime-managed exchange tracking, graph
-integration and Astral delivery. Pending requests are
-currently explicit application state. Exceptions retry after lease expiry with no
-attempt limit; no terminal failure/dead-letter policy exists yet. Handlers have an
-optional ordinary Python phase router; arbitrary coroutine stacks are not
-persisted. Firecracker is a later execution backend candidate.
+resources outside the code identity, a Redis `SessionBackend` and Astral
+delivery. Pending exchanges are application state behind `entourage.exchanges`,
+by decision; the runtime keeps no registry. Graph integration is no longer a
+goal: the graph runtime is retired. Attempt limits and backoff exist; a
+dead-letter policy beyond the `failed` status and the runner's notice does not.
+Handlers have an optional ordinary Python phase router; arbitrary coroutine
+stacks are not persisted. Firecracker is a later execution backend candidate.

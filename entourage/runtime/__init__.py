@@ -5,7 +5,13 @@ Interfaces: GraphStore (execution graph persistence) and ReadyQueue
 (transport for ready-work pointers). Backends here: in-memory (local/debug),
 SQLite (durable single-box), SQS (import from entourage.runtime.sqs — kept
 out of this namespace so boto3 stays an optional dependency).
+
+Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.
 """
+
+import warnings as _warnings
+
+_warnings.warn("entourage.runtime: Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.", DeprecationWarning, stacklevel=2)
 
 from .interfaces import GraphStore, QueueMessage, ReadyQueue
 from .planner import END, HEAD, MERGE, expand_plan

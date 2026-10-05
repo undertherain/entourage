@@ -31,7 +31,13 @@ id and register the route *before* the transport publishes the request —
 route registration is idempotent and an orphaned route (crash before
 publish) merely expires. Riding the route registration on the Transition
 commit itself is a planned refinement (see docs/coordination-plane.md).
+
+Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.
 """
+
+import warnings as _warnings
+
+_warnings.warn("entourage.ingress: Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.", DeprecationWarning, stacklevel=2)
 
 import time
 from abc import ABC, abstractmethod

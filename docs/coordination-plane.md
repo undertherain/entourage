@@ -1,5 +1,9 @@
 # The coordination plane — Entourage as a consumer
 
+> **Status 2026-10-05:** the graph runtime this document describes is retired;
+> the session core is the only scheduler. Kept as design history. See
+> [mailbox-first scheduling](mailbox-first-scheduling.md).
+
 Status: the plane contract itself — the three primitives, namespace and
 resolver, plane client, spawn/child contract, monitors, ingress/egress
 authority, distributed bindings — **moved to Aethera on 2026-08-18**: IOA

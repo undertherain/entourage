@@ -1,42 +1,49 @@
+"""One question through the session dispatcher: `python -m entourage "..."`.
+
+A throwaway store, one chat session, a search tool, and a `ui` session that
+prints the answer. Needs a model key and TAVILY_API_KEY; --help needs nothing.
+"""
+
+import argparse
 import logging
-import json
+import tempfile
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-from .agent import AgentWithTools
-from .flow import Node, Parallel, Sequence
+from .executables import Dispatcher, Executable
+from .sessions import LocalSessions
 from .tools import TavilySearchTool
-from .runtime import Runtime, END
+from .turn import ChatAgent, litellm_complete
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
-def A(state):
-    logger.info("we are in A")
-    return {"from_a": "A"}, None
+def print_answer(context, state, mail):
+    for event in mail:
+        print(event["payload"]["text"])
+    return context.propose(state, incorporated=[e["event_id"] for e in mail], complete=True)
 
-def B(state):
-    logger.info("we are in B")
-    return {"from_b": "B"}, None
 
-def HEAD(state):
-    logger.info("we are in head")
-    return ({}, Parallel(A, B))
-
-# Example usage:
-if __name__ == "__main__":
+def main():
     load_dotenv()
-    runtime = Runtime()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("question", nargs="?", default="what's the weather in Tokyo?")
+    parser.add_argument("--model", default="gpt-5-nano")
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO if args.debug else logging.WARNING)
+    with tempfile.TemporaryDirectory() as folder:
+        store = LocalSessions(Path(folder) / "sessions.db")
+        agent = ChatAgent(litellm_complete(args.model), [TavilySearchTool()], output="ui")
+        dispatcher = (Dispatcher(store, lease_seconds=120)
+                      .register(Executable("chat:v1", agent.resume))
+                      .register(Executable("ui:v1", print_answer)))
+        dispatcher.create("ui", "ui:v1", {})
+        dispatcher.create("chat", "chat:v1", {"messages": []})
+        store.append("chat", {"event_id": "q", "kind": "user", "payload": {"text": args.question}})
+        for result in dispatcher.run_until_idle():
+            if not result.committed:
+                raise SystemExit(f"{result.session_id}: {result.error}")
 
-    # Start a new session
-    tool = TavilySearchTool()
-    agent = AgentWithTools("gpt-5-nano", [tool])
-    initial_state = {
-        "messages": [{"role": "user", "content": "what's the weather in Tokyo?"}]
-    }
-    session_id = runtime.start_session(agent, initial_state)
-    logger.info("🚀 Started session: %s", session_id)
-    runtime.run()
+
+if __name__ == "__main__":
+    main()

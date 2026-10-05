@@ -1,5 +1,12 @@
-"""Durable-semantics mailboxes for events that join a running conversation."""
+"""Durable-semantics mailboxes for events that join a running conversation.
 
+Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.
+"""
+
+
+import warnings as _warnings
+
+_warnings.warn("entourage.mailbox: Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.", DeprecationWarning, stacklevel=2)
 import copy
 import threading
 import time

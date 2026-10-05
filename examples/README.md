@@ -18,7 +18,6 @@ The other examples all run on the same dispatcher and SQLite store:
 | Children and waiting | [spawn_supervisor.py](spawn_supervisor.py): fork-join, supervisor join with a death notice, impatience; [waiting_session.py](waiting_session.py): the three wake sources; [remote_tool_ingress.py](remote_tool_ingress.py): a remote reply in time and too late |
 | Failure policy | [retry_timeout.py](retry_timeout.py): attempt limits, backoff, a stale commit after lease expiry |
 | Shard runner | [shard/](shard/): agent folders launched and supervised by `python -m entourage.runner` |
-| Older mailbox prototype | [mailbox_cli.py](mailbox_cli.py): process-local `InMemoryMailbox` checkpoints, retired with that module per [mailbox-first scheduling](../docs/mailbox-first-scheduling.md#migration) |
 
 Run them from the repository root, for example `python examples/spawn_supervisor.py`.
 The chat examples take `--model` for your configured provider; `--help` makes no

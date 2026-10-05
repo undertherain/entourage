@@ -301,21 +301,21 @@ backend does not change.
    interjections at checkpoints; it retires with `entourage.mailbox` in
    step 5. Monitors and actors are retired as decided above. Tests:
    `tests/test_session_examples.py`.
-5. **Retire.** Move `entourage/runtime/`, `flow.py`, `transition.py`,
-   `mailbox.py`, `redis_mailbox.py`, `ingress.py`, `monitors.py`,
-   `conversation.py` and the graph versions of `agent.py`/`deployment.py` to
-   `legacy/` with their tests still running there. Rewrite the README thesis:
-   the remaining plan is session state. **Constraint found 2026-10-05:**
-   Second Brain imports `entourage.runtime` (`QueueRuntime`, graph stores,
-   ready queue), `entourage.mailbox.InMemoryMailbox`, `capabilities`,
+5. **Retire.** *Done in place 2026-10-05.* Because Second Brain imports
+   `entourage.runtime`, `entourage.mailbox`, `capabilities`,
    `builtin_capabilities`, `config.load_agent_manifest`, `deployment`
    (`load_tools`, `import_object`), `runner.Shard`, `invocation` and
-   `sessions`. So the move cannot change import paths until Second Brain's
-   graph consumers are ported; keep the old modules importable (or leave
-   thin re-export shims) until then. `capabilities`, `invocation`, `runner`
-   and `sessions` have no graph dependency and stay as they are. Delete
-   `legacy/` once Second Brain, the consumer NOW.md names, runs on the new
-   core.
+   `sessions`, the graph modules were not moved: `runtime/`, `flow`,
+   `transition`, `mailbox`, `redis_mailbox`, `ingress`, `monitors`,
+   `conversation` and `agent` now raise a `DeprecationWarning` on import and
+   say so in their docstrings; the graph-bound classes in `deployment.py`
+   and `config.py` are marked in the module docstrings while `load_tools`,
+   `import_object` and `AgentManifest` stay current. Their tests keep
+   running. `examples/mailbox_cli.py` is deleted, `python -m entourage` runs
+   one question through the dispatcher, README and ARCHITECTURE describe the
+   session model. The physical move to `legacy/` and the deletion happen
+   once Second Brain's graph consumers are ported. `capabilities`,
+   `invocation`, `runner` and `sessions` have no graph dependency and stay.
 
 Deliberately skipped until a consumer asks: the plan helper, strict waits in
 the backend, multi-host backends.

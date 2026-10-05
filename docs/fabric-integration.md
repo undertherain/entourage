@@ -1,5 +1,9 @@
 # Fabric (IOA) Integration Plan
 
+> **Status 2026-10-05:** the graph runtime this document describes is retired;
+> the session core is the only scheduler. Kept as design history. See
+> [mailbox-first scheduling](mailbox-first-scheduling.md).
+
 > Placement update, 2026-09-08: IOA ADR 0018 and
 > `durable-sessions-and-project-home.md` now place the graph-independent
 > durable-session execution core in Entourage, with Astral as a delivery binding

@@ -23,7 +23,13 @@ Commit and delivery semantics (the transactional-outbox pattern):
   proof of incorporation), publications carry idempotency ``event_id``s,
   and monitor arming is arm-if-absent — so replay is
   exactly-once-effective.
+
+Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.
 """
+
+import warnings as _warnings
+
+_warnings.warn("entourage.transition: Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.", DeprecationWarning, stacklevel=2)
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple

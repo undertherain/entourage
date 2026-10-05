@@ -1,5 +1,9 @@
 # Durable conversation mailboxes and bounded history
 
+> **Status 2026-10-05:** the graph runtime this document describes is retired;
+> the session core is the only scheduler. Kept as design history. See
+> [mailbox-first scheduling](mailbox-first-scheduling.md).
+
 Status: in-memory and Redis mailbox strategies implemented; graph-integrated
 runtime waiting sessions are not implemented. Recorded 2026-08-14 from the
 Concierge and KIP diagnostics-agent use cases.
@@ -185,7 +189,7 @@ the future waiting-session checkpoint design.
    `entourage.mailbox.Mailbox` now defines idempotent append and leased
    claim/ack/release semantics.
 2. ~~Implement an in-memory backend and deterministic interjection tests.~~
-   `InMemoryMailbox` is the reference backend; `examples/mailbox_cli.py`
+   `InMemoryMailbox` was the reference backend; the former `examples/mailbox_cli.py`
    demonstrates typed events joining work at safe checkpoints.
    `examples/telegram_group_manager.py` exercises wait-any conversation
    claiming, persistent typed event history, group triage, multi-source

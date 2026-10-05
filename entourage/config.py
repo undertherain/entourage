@@ -1,4 +1,10 @@
-"""Deployment configuration shared by Entourage applications and adapters."""
+"""Deployment configuration shared by Entourage applications and adapters.
+
+`AgentManifest` and `load_agent_manifest` are current. `RedisRuntimeConfig`,
+`RuntimeResources` and `RuntimeBackendConfig` select backends of the retired
+graph runtime (2026-10-05, see docs/mailbox-first-scheduling.md); the session
+core is configured by a shard manifest (docs/runner-shards.md).
+"""
 
 import os
 import re

@@ -1,5 +1,12 @@
-"""Composable primitives for agents that live across many incoming turns."""
+"""Composable primitives for agents that live across many incoming turns.
 
+Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.
+"""
+
+
+import warnings as _warnings
+
+_warnings.warn("entourage.conversation: Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.", DeprecationWarning, stacklevel=2)
 import inspect
 from dataclasses import dataclass
 from typing import Callable, Optional

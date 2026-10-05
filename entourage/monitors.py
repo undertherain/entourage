@@ -25,7 +25,13 @@ discipline as wait deadlines and completion routes).
 
 The remote side's own promised deadline may inform ``deadline``/``interval``
 but never enforces them: a dead child can't report itself dead.
+
+Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.
 """
+
+import warnings as _warnings
+
+_warnings.warn("entourage.monitors: Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.", DeprecationWarning, stacklevel=2)
 
 import copy
 import json

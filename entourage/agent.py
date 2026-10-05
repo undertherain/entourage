@@ -1,3 +1,9 @@
+
+"""Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md."""
+
+import warnings as _warnings
+
+_warnings.warn("entourage.agent: Retired graph runtime (2026-10-05): kept importable for existing consumers, not developed further. See docs/mailbox-first-scheduling.md.", DeprecationWarning, stacklevel=2)
 from litellm import completion
 import warnings
 

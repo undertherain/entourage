@@ -1,4 +1,10 @@
-"""Manifest-driven conversational agents and durable trigger workers."""
+"""Manifest-driven conversational agents and durable trigger workers.
+
+`import_object` and `load_tools` are current. `ConfiguredAgent`, `AgentWorker`,
+`MailboxAgentWorker` and `create_worker` belong to the retired graph runtime
+(2026-10-05, see docs/mailbox-first-scheduling.md); build on `entourage.turn`
+and `entourage.executables` instead.
+"""
 
 import importlib
 from pathlib import Path

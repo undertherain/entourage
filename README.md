@@ -1,15 +1,17 @@
 # Entourage
 
 **Entourage is a small Python framework for building LLM agents and workflows as one
-thing.** Steps are pure functions that *return* a declarative plan instead of calling each
-other; a runtime executes the plan against a persistent graph, so runs are durable,
-resumable, and replayable. The pattern it's built on is called **Control-by-Return**.
+thing: durable sessions.** A session is explicit state, its own mailbox and a lease. Your
+code is one function that wakes with the saved state and new mail, decides what to do,
+and proposes the next checkpoint. The runtime commits it atomically and releases the
+worker. Runs survive restarts, take corrections while they wait, and can be read back
+from the store at any time.
 
 > Status: research prototype / reference implementation — a vehicle for the idea, not a
 > production framework. Expect rough edges and a small, deliberately minimal API.
 
-Current execution work: [NOW.md](NOW.md) and the
-[shared runtime handoff](docs/execution-runtime-handoff.md).
+Current build state: [NOW.md](NOW.md). The decision that shaped the current design:
+[mailbox-first scheduling](docs/mailbox-first-scheduling.md).
 
 ---
 
@@ -17,88 +19,86 @@ Current execution work: [NOW.md](NOW.md) and the
 
 LLM systems usually sit at one of two ends of a spectrum:
 
-- **Workflows** — hand-wired graphs of steps (à la LangGraph, Airflow, Temporal). They are
-  deterministic and durable, each step is easy to test, and you can route every step to the
-  most appropriate (often cheapest) model. The cost is brittleness: a workflow can only do
-  what it was wired to do.
+- **Workflows** — hand-wired graphs of steps (à la LangGraph, Airflow, Temporal).
+  Deterministic, durable, each step easy to test and cheap to route to the right model.
+  The cost is brittleness: a workflow can only do what it was wired to do.
 - **Agents** — an LLM in a Reason–Act loop (à la LangChain, CrewAI, AutoGen). They handle
-  novel inputs because the model picks the next action at runtime, but they are expensive,
-  the orchestration lives inside one model's context window, and the whole run sits in a
-  single process — a crash mid-tool loses it.
+  novel inputs because the model picks the next action at runtime, but the orchestration
+  lives inside one model's context window and the whole run sits in one process: a crash
+  mid-tool loses it.
 
-Most real systems live in between, and the only thing that really differs between the two
-ends is **where the decision about the next step lives** — in the graph you drew, or inside
-a model at runtime. Entourage makes that location a *return value*, and the two ends become
-two configurations of the same machinery.
+The only thing that really differs between the two ends is **where the decision about the
+next step lives**: in the code you wrote, or inside a model at runtime. Entourage makes
+that decision a value in session state, re-decided at every wake. A workflow stores a
+phase name; an agent stores a conversation and asks the model. Both are the same session,
+the same entrypoint and the same checkpoint.
 
 ### How it works
 
-A **node** is a pure function:
+A **definition** is versioned code with one entrypoint:
 
 ```python
-node: state -> (new_state, plan)
+def resume(context, state, mail):   # -> context.propose(...)
 ```
 
-A node never calls another node directly. Instead it returns a **plan**, built from three
-combinators:
+A **session** binds a definition to durable JSON state and an inbox. An **activation**
+is one leased attempt to resume it: the dispatcher restores state and a bounded batch of
+mail, calls `resume`, and commits the returned proposal (new state, the mail it
+incorporated, outgoing mail, spawned children, the next deadline or completion) in one
+transaction. Returning from the function is not a checkpoint; the proposal is.
 
 ```python
-Sequence(a, b, c)        # run a, then b, then c
-Parallel(a, b, c)        # fork-join; resulting states are merged
-Conditional(key, plan)   # run plan only if state[key] is truthy
+from entourage.executables import Dispatcher, Executable
+from entourage.sessions import LocalSessions
+
+def resume(context, state, mail):
+    for event in mail:
+        state["seen"] = state.get("seen", 0) + 1
+    return context.propose(state, incorporated=[e["event_id"] for e in mail])
+
+store = LocalSessions("sessions.db")
+worker = Dispatcher(store).register(Executable("counter:v1", resume))
+worker.create("counter", "counter:v1", {})
+store.append("counter", {"event_id": "m1", "kind": "user", "payload": {"text": "hi"}})
+worker.run_until_idle()
 ```
 
-Any leaf can carry an execution policy — retries, per-attempt timeout, retry delay:
-
-```python
-Sequence(fetch, Node(call_api, max_attempts=3, timeout=10, retry_delay=1), report)
-```
-
-The policy is stored on the execution itself, so every worker honors it; a node that
-exhausts its attempts fails its session terminally (`examples/retry_timeout.py`).
-
-The runtime splices the returned plan into a **persistent execution graph**, between the
-current node and whatever was scheduled to follow it. Because the plan is data on disk — not
-frames on a call stack — a run can be paused, persisted, resumed on another machine, retried,
-and replayed. (This is *trampolined execution*: each step yields control back to a scheduler
-instead of recursing through the host language's stack.)
+A session is runnable when it has unincorporated mail or a passed deadline. Creation is
+the first checkpoint, every wake runs the same entrypoint, completion is the last. There
+is no "wait" step: every proposal that is not complete parks the session, holding no
+worker.
 
 Two things follow directly:
 
-- **An agent is a workflow with a self-edge.** The whole Reason–Act loop is one line — the
-  node schedules a tool, then schedules *itself* to inspect the result:
+- **An agent is one model call per activation.** `entourage.turn.ChatAgent` keeps the
+  conversation in state, runs tool calls inline, checkpoints the tool results and lets
+  the next activation call the model again. A user message that arrives while tools run
+  is seen by the model on the next wake, which is what makes steering possible.
+- **A workflow is a phase table.** `state["phase"]` names where to reconsider; the
+  handler reads it, does the step, writes the next phase. A checkpoint between two steps
+  is `propose(state, deadline=NOW)`.
 
-  ```python
-  return context, Sequence(tool, my_node)
-  ```
+Between sessions there are three relations, and they are the whole coordination model:
 
-- **A workflow is an agent without LLM decisions** — a node whose plan happens to be
-  hard-coded. So the choice is no longer "framework A vs framework B" but, per node:
-  *who picks the next step — me, or the model?*
+| Relation | Shape | Example |
+| --- | --- | --- |
+| `send` to an identity-keyed address | fire-and-forget | triage hands a message to the chat's session |
+| `request`/`reply` to an owned child | a pipe: the parent's mailbox is the return address | a subagent spawned in the parent's checkpoint |
+| `request`/`reply` to an existing service | a call | a tool worker session |
 
-And two useful properties come for free:
-
-- **Per-step model selection.** Each node embeds its own model and prompt, so you can mix
-  cheap and expensive LLMs within one flow — a cheap classifier can gate an expensive
-  reasoner. Cost and capability are decided per step, not globally.
-- **Durable, replayable runs.** Persistence, retries, and time-travel debugging come from
-  the runtime, because the control flow is just a persisted data structure. Runtime-grown
-  structures like Tree-of-Thought fit the same primitive: a node returns `Parallel` over
-  candidate branches and the thought tree *is* the execution graph.
+`entourage.exchanges` keeps the pending table in state and splits delivered mail into
+the replies a session waited for and everything else, so a parent can run an `all` or
+`any` join and still take a correction while it waits.
 
 ### A worked example
 
-A Telegram community-manager bot. Each incoming message starts a session with the initial
-plan `Sequence(Triage, End)`:
-
-- `Triage` runs a cheap yes/no LLM. Off-topic → it returns no plan and the session ends.
-- On-topic → it returns `Sequence(Generate, Send)`, which the runtime splices into the
-  graph. `Generate` is a tool-calling agent on a stronger LLM with RAG; `Send` posts the
-  reply.
-
-One small program demonstrates per-step model selection, a graph that grows at runtime
-(triage decides the rest of the plan), and human-in-the-loop readiness: an approval node can
-be inserted before `Send` without touching any other code.
+A Telegram community-manager bot. One session per chat holds the typed history. A turn
+is two checkpointed phases: triage on a cheap model, commit, then the answer on a strong
+one, so messages arriving during triage join the answer's context. Replies are mail to a
+`telegram-outbox` session whose handler calls the Bot API. Inserting an approval step
+before delivery is address rerouting, not a code change in the chat. The example carries
+a second triage shape as well: a per-event session that labels each message and forwards
+it, parallel and stateless. See `examples/telegram_group_manager.py`.
 
 ---
 
@@ -119,200 +119,58 @@ TAVILY_API_KEY=tvly-...   # for the search-tool example
 
 ## Quick start
 
-A CLI example runs a persistable agent with memory and search tools:
+A chat agent whose conversation is session state, with memory and search tools:
 
 ```bash
 python3 examples/cli.py
 ```
 
-- Interact with the agent in natural language.
-- `/new` starts a fresh session (clears context, keeps long-term memory).
-- `--debug` enables model/tool output and runtime logging:
+- Interact with the agent in natural language. Kill the process mid-turn and start it
+  again: the turn finishes from its last checkpoint.
+- `/new` starts a fresh session (keeps long-term memory).
+- `--debug` shows tool calls and runtime logging.
 
-```bash
-python3 examples/cli.py --debug
-```
+One question, no state kept: `python3 -m entourage "what's the weather in Tokyo?"`.
 
-More examples live in `examples/` (`telegram_group_manager.py`, `coding_agent.py`).
+The [examples index](examples/README.md) lists the rest: a coding agent, the Telegram
+group manager, children and supervision, waiting and late replies, retry policy, and a
+shard launched by the runner. The standalone ones need no model key. Start with the
+**[registered agent](examples/mailboxes/registered/README.md)** for the full authoring
+contract: adjacent manifest, prompt and tools, a correction while a tool is pending, and
+resumption in a fresh process.
 
-To see Codex-like interjections, run the in-memory mailbox checkpoint demo.
-It uses LiteLLM with `gpt-5-nano` by default and inserts short artificial work
-stages so there is time to enqueue another user message, `/subagent ...`, or
-`/ambient ...`. Events drained before the model call are included in that same
-answer:
+---
 
-```bash
-python3 -m examples.mailbox_cli
-```
+## Sessions
 
-Select another model or change the timing with `MAILBOX_DEMO_MODEL` and
-`MAILBOX_DEMO_STEP_DELAY`.
+- **Contract.** [Resumable executables](docs/resumable-executables.md): definitions,
+  manifests, `Context` helpers, batches, failure. The dispatcher depends on a
+  [session backend interface](docs/session-backends.md); SQLite is the implementation,
+  with a conformance suite for future adapters.
+- **Lifetime.** Keying plus completion, not a runtime property: per event, per
+  conversation or singleton at ingress; parent-spawned children; retention by purge.
+  [Session lifetimes](docs/session-lifetimes.md).
+- **Upgrades.** A long-lived session moves to a new definition version lazily at its
+  next wake through declared migrations. [Session upgrades](docs/session-upgrades.md).
+- **Deployment.** A shard: agent folders run as worker processes or podman containers
+  over one store, supervised by a runner that reads the store; eager or on-demand start,
+  idle grace, reserved capacity, attempt limits, failure notices as mail.
+  [Deployment shards](docs/runner-shards.md), [demo shard](examples/shard/shard.yaml).
+- **Cost model.** A parked session holds no memory. Every hop between sessions is a
+  checkpoint and a claim; steps inside a session do not touch a queue. Keep session
+  state small and reference bulky data.
 
-The demo uses a redraw-safe message composer: background checkpoint output is
-rendered above it without destroying a partially typed message.
+## Capabilities
 
-### Continuous agents
+`entourage.capabilities` composes agent behaviour by registration rather than
+inheritance: contributive capabilities add prompt sections and tools and cannot
+invalidate each other; at most one `ConversationLifecycle` owns history and decides what
+the model sees for a turn. `builtin_capabilities` ships `Facts`, `RecentSummaries` and
+`TopicShiftLifecycle`. These are application-level units with no runtime dependency; the
+`ConfiguredAgent` and `ContinuousAgent` drivers that used them belong to the retired
+graph runtime below.
 
-An experimental graph-independent session core now supports local durable
-mail/deadline wakeups, leased activations and atomic checkpoints. See
-[`docs/durable-sessions.md`](docs/durable-sessions.md) for its current scope and
-a runnable example that parks and resumes across fresh processes.
-`entourage.executables` adds versioned Python registration, local manifests and a
-resident dispatcher: handlers return checkpoint proposals from restored state and
-mail. The [registered agent example](examples/mailboxes/registered/README.md)
-handles a user correction while a tool is pending, then resumes after restart.
-See the [executable contract](docs/resumable-executables.md). Subprocess launching
-and integration with the graph runner remain follow-up work.
-The dispatcher depends on a [session backend interface](docs/session-backends.md)
-covering state, mail, leases and atomic checkpoints; SQLite is its current
-implementation, with a reusable conformance suite for future adapters.
-Session lifetime is an application decision, not a runtime one: ingress keying
-(per event, per conversation or singleton), parent-spawned task sessions and
-completed-session retention are described in
-[session lifetimes](docs/session-lifetimes.md). Long-lived sessions move to a
-new definition version lazily at their next wake through declared upgrades; see
-[session upgrades](docs/session-upgrades.md). A deployment runs its agents as a
-shard: worker processes or podman containers over one store, supervised by a
-runner that reads the store; see [deployment shards](docs/runner-shards.md) and
-the runnable [demo shard](examples/shard/shard.yaml).
-
-Start with the [registered example](examples/mailboxes/registered/README.md) for
-the current API. The other [mailbox examples](examples/mailboxes/README.md) retain
-the earlier receive-loop and saved-step teaching prototypes, plus a longer
-[tool clarification walkthrough](docs/mailbox-tool-examples.md).
-
-`entourage.conversation` provides a configurable loop for an agent whose
-conversation outlives any one incoming-message execution:
-
-- `ConversationPolicy` retains the legacy topic-shift fields for direct callers and
-  selects a manual reset command such as `/new`. Generic configured agents disable
-  semantic topic detection; applications own that policy.
-- `ContinuousConversation` owns the live segment and prompt rebuilding around durable
-  `ChatHistory`. It can still accept the legacy optional `TopicMemory`, but does not
-  require a semantic archive provider.
-- `ContinuousAgent` supplies the main model/tool loop while the application
-  supplies its tools and system-prompt builder.
-- `TopicMemory` is a compatibility helper for applications that still want the original
-  litellm-based detector and summarizer. `archive_record()` returns a structured result
-  so callers never reconstruct its filenames; `archive()` retains the original string-ID
-  return for compatibility. New applications should keep topic semantics outside the
-  execution substrate.
-
-### Capabilities
-
-Behaviour composes rather than subclasses. A **capability** is a self-contained
-unit — durable facts, topic tracking, a tool family — that an agent registers,
-and `entourage.capabilities` splits them by what a hook is allowed to do:
-
-- **Contributive** (`Capability`) — many per agent. `prompt_section()` and
-  `tools()` merge in registration order. One capability cannot invalidate
-  another, so composition is safe by construction.
-- **Exclusive** (`ConversationLifecycle`) — a capability that *also* owns
-  conversation history; at most one per agent. It decides when a segment is
-  archived, reset, evicted, or projected. Two owners would fight over the same
-  state and the symptom would surface far away, as context that drifts or
-  duplicates, so a second one is rejected at construction.
-
-```python
-agent = ConfiguredAgent(manifest, "telegram:9", capabilities=[
-    Facts(MemoryDB(state_dir / "memory.txt")),   # contributive
-    MyTopicRouting(...),                          # exclusive: owns history
-])
-```
-
-`ConfiguredAgent.default_capabilities()` is empty: a configured agent is its
-manifest's prompt and tools and nothing else. Memory and history policy are
-composed in by the application, or by overriding that method.
-
-The lifecycle returns a `TurnPlan`, which separates two things usually
-conflated:
-
-- `history` **replaces the durable record** — a reset, an archive, an eviction.
-- `view` is **what the model sees for this call only**, leaving the record
-  intact. It is how an agent shrinks or reshapes a prompt — trimming,
-  summarizing, dropping tool traffic — without losing the conversation.
-- `handled` short-circuits the turn with a reply and no model call.
-
-`builtin_capabilities` ships `Facts`, `RecentSummaries`, and
-`TopicShiftLifecycle` — the historical behaviours, as replaceable units with no
-privileged access. An agent that composes none of them is a supported
-configuration.
-
-This is logical conversation continuity over turn-level execution sessions.
-For graph-native waiting, `flow.WaitForMailbox` is a plan leaf that parks
-its execution durably — status `waiting`, holding no worker — and wakes
-when its conversation has claimable events or its timeout fires (delivered
-as a `kind: system` timer event); drained events join the successor's
-state and are acknowledged inside the transition commit.
-`entourage.ingress` routes normalized external results (webhook, broker,
-poller — transport adapters stay outside) into the right conversation:
-back into a parked await, or into a resident agent's inbox. Child
-sessions spawn atomically on the transition commit
-(`Transition(spawn=[Spawn(...)])`) and report back as correlated mail;
-monitors (`Transition(arm=[Monitor(...)])`) turn silence into
-`kind: system` mail. Runnable walkthroughs, no external services needed:
-
-```bash
-python examples/waiting_session.py     # park, wake on mail, wake on timer
-python examples/remote_tool_ingress.py # remote call joins or falls to inbox
-python examples/spawn_supervisor.py    # fork-join, supervisor loop, monitor lapse
-```
-
-The agreed event model,
-safe-point ingestion semantics, and independent conversation/context/graph
-retention policies are recorded in
-[`docs/conversation-mailboxes.md`](docs/conversation-mailboxes.md). The
-communication layer above it is Aethera's coordination plane (contract in
-IOA `docs/architecture/components/messaging/coordination-plane.md`);
-Entourage's consumer-side contract — the Transition surface, spawn riding
-the commit, and the four-verb plane adapter — is
-[`docs/coordination-plane.md`](docs/coordination-plane.md).
-
-For multi-agent deployments, `RuntimeBackendConfig` selects one coherent family
-of graph-store, ready-queue, and mailbox strategies. `backend: memory` gives a
-zero-infrastructure test runtime; `backend: redis` derives three isolated
-namespaces from an application-selected prefix. Agents can share one Redis
-deployment while keeping scheduler namespaces isolated when their workers
-register different node sets.
-
-`entourage.deployment` removes the repeated worker ceremony from those
-deployments. An application-owned YAML manifest selects the agent id, trigger,
-models, prompt file, state directory, setup hook, and tool factories. Relative
-paths resolve beside the manifest, so the same format can live in another
-repository. `AgentWorker` turns it into a durable trigger pipeline and keeps
-one continuous agent per `conversation_id`; a publisher callback owns delivery
-to Telegram, a console, or another transport.
-
-```yaml
-agent:
-  id: diagnostics
-  trigger: diagnostics.message
-  runtime:
-    backend: redis
-    prefix: agents:diagnostics
-    url: ${AGENT_REDIS_URL}
-  state_dir: state
-  model: ${AGENT_MODEL}
-  utility_model: ${AGENT_UTILITY_MODEL}
-  prompt: prompt.md
-  setup: diagnostics.tools:setup
-  tools:
-    - diagnostics.tools:QueryLogs
-```
-
-### Telegram group manager
-
-`examples/telegram_group_manager.py` is the canonical conversational transport
-demo. Telegram messages, local CLI input, ambient/Grafana observations,
-announcements, and subagent updates enter one typed mailbox and agent-owned
-event history. Ordinary group chatter is recorded but triaged away; useful
-questions are answered after safe-point drains, so messages arriving during
-the artificial work stages can join the same model call.
-
-Telegram is only a producer and delivery adapter. `/announce TEXT` demonstrates
-the own-message problem explicitly: the ambient event is recorded first, then
-sent to Telegram with a delivery receipt, so the agent knows about a message
-which Telegram's `getUpdates` will never echo back to the bot.
+## Telegram group manager
 
 ```bash
 export TELEGRAM_BOT_TOKEN=...
@@ -323,79 +181,43 @@ export OPENAI_API_KEY=...
 python3 -m examples.telegram_group_manager
 ```
 
-The demo defaults to the coherent in-memory backend family. For a durable NAS
-run, select Redis without changing application code:
-
-```bash
-export GROUP_MANAGER_RUNTIME_BACKEND=redis
-export GROUP_MANAGER_REDIS_URL=redis://localhost:6379/0
-export GROUP_MANAGER_RUNTIME_PREFIX=entourage:group-manager
-python3 -m examples.telegram_group_manager
-```
-
-The CLI commands are `/ambient`, `/announce`, `/subagent`, and `/quit`. Disable
-Telegram group privacy through BotFather when the bot must observe ordinary
-group chatter rather than only commands and direct mentions.
-
-The event history is persistent under `data/telegram-group-manager/`. With the
-memory backend, pending mail remains process-local; Redis stores the mailbox
-events, leases and deduplication keys. This demo uses the family's mailbox, with
-history writes and Telegram delivery performed separately. It does not use an
-execution graph or the new atomic session checkpoint API. Migrating the transport
-demo to that API remains follow-up work.
+Telegram messages, local CLI input, ambient observations, announcements and subagent
+updates all enter the chat's session; ordinary chatter is recorded as context and
+triaged away, questions are answered. `/announce TEXT` records the ambient event first
+and then delivers it, so the agent knows about a message that `getUpdates` will never
+echo back. `GROUP_MANAGER_TRIAGE=session` switches to per-event triage sessions. State
+lives under `data/telegram-group-manager/sessions.db`; inspect it with
+`LocalSessions.inspect`. Disable group privacy through BotFather when the bot must see
+ordinary chatter.
 
 ---
 
 ## Architecture
 
-- **`entourage/flow.py`** — the combinators: `Sequence`, `Parallel`, `Conditional`, and the
-  policy-carrying `Node` leaf (retry/timeout controls).
-- **`entourage/runtime/`** — the scheduler. One engine (`QueueRuntime`) uses three backend
-  strategies: `GraphStore` (the persistent execution graph — in-memory, SQLite, and Redis),
-  `ReadyQueue` (pointers to ready work — in-memory, Redis with fair-share claiming per
-  session, and AWS SQS), and `Mailbox` (typed conversation events — in-memory and Redis).
-  The Redis family puts the whole runtime state on one server:
-  a durable, multi-worker deployment with ~3 ms/node orchestration overhead.
-  The in-memory pair powers the local `Runtime` used by the examples; any durable
-  store+queue combination gives fault-tolerant, resumable runs. The graph algebra (ready
-  detection, fan-in joins, plan splicing) is shared code, tested identically across
-  backends (`tests/`).
-  A node's return is a *proposed transition*: the runtime stages any returned plan
-  first, then commits result state, spliced plan, and rewiring as **one atomic store
-  operation** (`commit_transition` — a SQLite transaction, a Redis MULTI). A crash
-  mid-commit therefore re-runs the node on recovery instead of silently losing the plan
-  it returned; fault-injection tests in `tests/test_transition_commit.py` pin this down.
-  Computation proposes; the runtime commits.
-  Coordination-aware nodes return a full `entourage.transition.Transition` — plain
-  `state` and `(state, plan)` returns remain sugar for it. Its `acknowledge` and
-  `publish` fields are **mailbox effects riding the same commit** (transactional
-  outbox): recorded atomically with the completion, applied to the mailboxes right
-  after, cleared once applied, and replayed idempotently at recovery — force-ack
-  (the commit, not the lease, proves incorporation) plus deterministic publication
-  `event_id`s make replay exactly-once-effective. Publication targets are opaque
-  names mapped by an injectable `mailbox_resolver`. A delivery failure never fails
-  the committed node; pending effects wait in the outbox index for the next replay
-  (`tests/test_transition_effects.py`).
-- **Retention** — terminal execution graphs are collected incrementally under a
-  configurable TTL/count/batch policy on every graph backend. Acknowledged
-  mailbox payloads and their idempotency tombstones have separate retention;
-  typed conversation history rotates to an append-only archive. See
-  [`docs/retention.md`](docs/retention.md).
-- **`entourage/agent.py`** — high-level helpers that package the one-line Reason–Act pattern
-  and compile down to the same `Sequence`/`Parallel` primitives the workers understand.
+The principles and the module map are in [ARCHITECTURE.md](ARCHITECTURE.md). In short:
+`sessions` and `session_backend` hold the store contract; `executables` the definitions,
+`Context` and `Dispatcher`; `session_ingress` the keying; `exchanges` the pending
+request/reply table; `turn` one model call with tools; `runner` and `worker` the shard.
+Persisted state is never a Python stack: restart happens at a known entrypoint.
 
-Long-running tools and human-in-the-loop steps go through the same dispatch/result-queue
-path, so workers never block: the runtime parks the plan, frees the worker, and resumes
-wherever the result lands — even days later.
+### Retired graph runtime
 
-See `ARCHITECTURE.md` for more.
+Entourage began as Control-by-Return: nodes returned `Sequence`/`Parallel` plans that a
+runtime spliced into a persisted execution graph. That runtime (`entourage.runtime`,
+`flow`, `transition`, `mailbox`, `ingress`, `monitors`, `conversation`, `agent`) is
+retired as of 2026-10-05 and replaced by the session core; the reasoning is in
+[mailbox-first scheduling](docs/mailbox-first-scheduling.md). The modules stay
+importable with a `DeprecationWarning` while existing consumers migrate, and their tests
+still run. Graph scheduling turned out to be a special case of mailboxes: a successor
+step is a single-use address that shares the session's state and lifetime.
 
 ---
 
 ## Status and limitations
 
 Entourage is a programming-concept experiment, offered as an invitation to use the
-primitive rather than as a drop-in dependency. The calculus is deliberately minimal —
-three combinators — and there is not yet typed-plan support, a principled scheduling
-policy, or a quantitative comparison against incumbent frameworks. The reference
-implementation may lag the design.
+primitive rather than as a drop-in dependency. The session core is SQLite-only and single
+host; a Redis backend and distributed delivery are future work. There is no lease renewal
+(the lease is the hard step limit), no replay of past checkpoints beyond the current
+state, and no dead-letter policy beyond the `failed` status and the runner's notice. The
+reference implementation may lag the design.

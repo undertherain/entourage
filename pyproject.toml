@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "entourage"
 version = "0.1.0"
-description = "A graph-based agent framework"
+description = "Durable sessions for LLM agents and workflows: state, mailbox, lease"
 authors = [
   { name="Entourage Team", email="entourage@example.com" },
 ]

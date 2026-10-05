@@ -1,10 +1,14 @@
+import pytest
+
 from entourage.integrations.telegram import TelegramListener, TelegramSender
 from entourage.integrations.telegram import bot as telegram_bot
-from entourage.mailbox import InMemoryMailbox
-from entourage.memory import EventHistory
+from entourage.sessions import LocalSessions
 from examples.telegram_group_manager import (
     GroupManager,
+    TelegramOutbox,
+    build_dispatcher,
     event_messages,
+    ingress,
     parse_cli,
     telegram_event,
 )
@@ -76,41 +80,30 @@ def test_sender_returns_telegram_message(monkeypatch):
     )]
 
 
-def test_group_demo_normalizes_telegram_into_typed_event():
-    message = {
-        "chat_id": "42",
-        "sender": "alex",
-        "sender_id": "5",
-        "text": "remember this",
-        "message_id": 9,
-        "update_id": 7,
-        "timestamp": 1234,
-    }
+def test_group_demo_normalizes_telegram_into_session_mail():
+    message = {"chat_id": "42", "sender": "alex", "sender_id": "5", "text": "remember this",
+               "message_id": 9, "update_id": 7, "timestamp": 1234}
 
-    conversation_id, event = telegram_event(message)
+    conversation, event = telegram_event(message)
 
-    assert conversation_id == "telegram:42"
+    assert conversation == "telegram:42"
     assert event == {
-        "event_id": "telegram:7",
-        "kind": "user",
-        "source": "telegram",
-        "sender": "alex",
-        "sender_id": "5",
-        "content": "remember this",
-        "chat_id": "42",
-        "telegram_message_id": 9,
-        "reply_target": {"channel": "telegram", "chat_id": "42"},
-        "created_at": 1234,
+        "event_id": "telegram:7", "kind": "user", "source": "telegram",
+        "payload": {
+            "sender": "alex", "sender_id": "5", "content": "remember this", "chat_id": "42",
+            "telegram_message_id": 9,
+            "reply_target": {"channel": "telegram", "chat_id": "42"}, "created_at": 1234,
+        },
     }
 
 
 def test_group_demo_preserves_event_roles_for_model():
     assert event_messages([
-        {"kind": "user", "sender": "alex", "content": "question"},
-        {"kind": "ambient", "content": "Grafana summary"},
-        {"kind": "subagent", "content": "worker update"},
-        {"kind": "assistant", "content": "answer"},
-        {"kind": "delivery", "content": "not model context"},
+        {"kind": "user", "payload": {"sender": "alex", "content": "question"}},
+        {"kind": "ambient", "payload": {"content": "Grafana summary"}},
+        {"kind": "subagent", "payload": {"content": "worker update"}},
+        {"kind": "assistant", "payload": {"content": "answer"}},
+        {"kind": "delivery", "payload": {"content": "not model context"}},
     ]) == [
         {"role": "user", "content": "alex: question"},
         {"role": "system", "content": "[ambient update]\nGrafana summary"},
@@ -119,106 +112,122 @@ def test_group_demo_preserves_event_roles_for_model():
     ]
 
 
-def make_manager(tmp_path, triage, answer, sent, output=None):
-    return GroupManager(
-        InMemoryMailbox(),
-        tmp_path,
-        lambda chat_id, text: sent.append((chat_id, text)) or {
-            "result": {"message_id": len(sent)}
-        },
-        triage=triage,
-        answer=answer,
-        output=(output or []).append,
-        step_delay=0,
-    )
+CHAT = "group:telegram:42"
 
 
-def publish_user(manager, content="question"):
-    manager.publish("telegram:42", {
-        "event_id": f"event:{content}",
-        "kind": "user",
-        "source": "telegram",
-        "sender": "alex",
-        "content": content,
-        "chat_id": "42",
-        "reply_target": {"channel": "telegram", "chat_id": "42"},
-    })
+class Demo:
+    """A group manager, its outbox and a dispatcher over one local store."""
+
+    def __init__(self, tmp_path, triage, answer, **options):
+        self.store = LocalSessions(tmp_path / "sessions.db", clock=lambda: 100.0)
+        self.sent, self.output = [], []
+        self.manager = GroupManager(triage, answer, output=self.output.append)
+        self.outbox = TelegramOutbox(self.send, output=self.output.append)
+        self.worker = build_dispatcher(self.store, self.manager, self.outbox, **options)
+        assert self.worker.run_once().session_id == "telegram-outbox"  # parks until mail
+        self.ingress = ingress(self.store)
+
+    def send(self, chat_id, text):
+        self.sent.append((chat_id, text))
+        return {"result": {"message_id": len(self.sent)}}
+
+    def publish(self, event):
+        return self.ingress.deliver("group", event, conversation="telegram:42")
+
+    def user(self, content="question"):
+        return self.publish({"event_id": f"event:{content}", "kind": "user", "source": "telegram",
+                             "payload": {"sender": "alex", "content": content, "chat_id": "42",
+                                         "reply_target": {"channel": "telegram", "chat_id": "42"}}})
+
+    def run(self):
+        for result in self.worker.run_until_idle():
+            assert result.committed, result.error
+
+    def events(self):
+        return [(e["kind"], e["payload"]["content"])
+                for e in self.store.inspect(CHAT)["state"]["events"]]
 
 
 def test_group_demo_records_and_replies_to_triaged_message(tmp_path):
-    sent = []
-    manager = make_manager(
-        tmp_path,
-        lambda *_args: True,
-        lambda *_args: "the answer",
-        sent,
-    )
-    publish_user(manager)
+    demo = Demo(tmp_path, lambda *_: True, lambda *_: "the answer")
+    assert demo.user().created
 
-    assert manager.process_next() is True
-    events = EventHistory("telegram:42", tmp_path).get_events()
-    assert [(event["kind"], event["content"]) for event in events] == [
-        ("user", "question"),
-        ("assistant", "the answer"),
-    ]
-    assert sent == [("42", "the answer")]
+    demo.run()
+
+    assert demo.events() == [("user", "question"), ("delivery", "the answer"),
+                             ("assistant", "the answer")]
+    assert demo.sent == [("42", "the answer")]
+    assert demo.store.inspect(CHAT)["state"]["phase"] == "idle"
+    assert demo.store.inspect("telegram-outbox")["state"] == {"delivered": 1}
 
 
 def test_group_demo_records_chatter_without_replying(tmp_path):
-    sent = []
-    manager = make_manager(
-        tmp_path,
-        lambda *_args: False,
-        lambda *_args: "must not run",
-        sent,
-    )
-    publish_user(manager, "ordinary chatter")
+    demo = Demo(tmp_path, lambda *_: False, lambda *_: "must not run")
+    demo.user("ordinary chatter")
 
-    manager.process_next()
+    demo.run()
 
-    assert sent == []
-    assert EventHistory("telegram:42", tmp_path).get_events()[0]["content"] == "ordinary chatter"
+    assert demo.sent == []
+    assert demo.events() == [("user", "ordinary chatter")]
+    assert demo.worker.run_once() is None
 
 
-def test_group_demo_ingests_subagent_update_before_answer(tmp_path):
-    sent = []
+def test_mail_arriving_during_triage_joins_the_answer_after_a_restart(tmp_path):
     captured = []
-    manager = None
+    demo = None
 
-    def triage(*_args):
-        manager.publish("telegram:42", {
-            "event_id": "subagent:1",
-            "kind": "subagent",
-            "source": "worker",
-            "content": "found the timeout",
-        })
+    def triage(_model, _name, messages):
+        demo.publish({"event_id": "subagent:1", "kind": "subagent", "source": "worker",
+                      "payload": {"content": "found the timeout"}})
         return True
 
     def answer(_model, _name, messages):
         captured.extend(messages)
         return "timeout found"
 
-    manager = make_manager(tmp_path, triage, answer, sent)
-    publish_user(manager)
+    demo = Demo(tmp_path, triage, answer)
+    demo.user()
+    first = demo.worker.run_once()
+    assert first.session_id == CHAT and first.committed
+    assert demo.store.inspect(CHAT)["state"]["phase"] == "answer"
+    assert captured == []
 
-    manager.process_next()
+    fresh = build_dispatcher(demo.store, demo.manager, demo.outbox)  # a new process
+    for result in fresh.run_until_idle():
+        assert result.committed, result.error
 
     assert {"role": "system", "content": "[subagent update]\nfound the timeout"} in captured
-    assert sent == [("42", "timeout found")]
+    assert demo.sent == [("42", "timeout found")]
+    assert [kind for kind, _ in demo.events()] == ["user", "subagent", "delivery", "assistant"]
+
+
+def test_burst_is_coalesced_into_one_triage(tmp_path):
+    seen = []
+    demo = Demo(tmp_path, lambda _m, _n, messages: seen.append(len(messages)) or False,
+                lambda *_: "unused", max_events=1)
+    demo.user("first")
+    demo.user("second")
+
+    demo.run()
+
+    assert seen == [2]
+    assert demo.events() == [("user", "first"), ("user", "second")]
 
 
 def test_group_demo_mirrors_announcement_and_records_receipt(tmp_path):
-    sent = []
-    manager = make_manager(
-        tmp_path,
-        lambda *_args: False,
-        lambda *_args: "unused",
-        sent,
-    )
-    manager.publish("telegram:42", parse_cli("/announce hourly summary", "42"))
+    demo = Demo(tmp_path, lambda *_: False, lambda *_: "unused")
+    demo.publish(parse_cli("/announce hourly summary", "42"))
 
-    manager.process_next()
+    demo.run()
 
-    events = EventHistory("telegram:42", tmp_path).get_events()
-    assert [event["kind"] for event in events] == ["ambient", "delivery"]
-    assert sent == [("42", "hourly summary")]
+    assert demo.events() == [("ambient", "hourly summary"), ("delivery", "hourly summary")]
+    assert demo.sent == [("42", "hourly summary")]
+
+
+def test_unknown_mail_fails_the_activation(tmp_path):
+    demo = Demo(tmp_path, lambda *_: True, lambda *_: "unused")
+    demo.publish({"event_id": "r1", "kind": "result", "payload": {}})
+    result = demo.worker.run_once()
+    assert not result.committed
+    with pytest.raises(ValueError, match="unexpected mail 'r1'"):
+        raise result.error

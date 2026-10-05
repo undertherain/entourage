@@ -258,12 +258,20 @@ backend does not change.
    `Dispatcher` with a printing `ui` session as the output adapter; the
    file-backed `ChatHistory` is no longer needed there. The graph `agent.py`
    stays until step 5. Tests: `tests/test_turn.py`.
-2. **Telegram** (`A, B`). Two definitions: triage, keyed per event, `send`s to
-   the conversation session, keyed per chat id, which runs the step 1 handler
-   and publishes to a Telegram outbox address delivered by an adapter.
-   `deployment.py`/`config.py` rebuilt around the `Dispatcher` and ingress
-   keying. Proof: `test_telegram_integration.py` green on the new path with
-   history inside the conversation session, replacing `ContinuousConversation`.
+2. **Telegram** (`A, B`). *Done 2026-10-05.* The old demo was already off
+   the graph, running over `InMemoryMailbox` with sleeps standing in for
+   checkpoints. Now `examples/telegram_group_manager.py` is one session per
+   chat (`SessionIngress`, conversation keying) holding the typed history in
+   state, with two checkpointed phases: triage on the cheap model, commit
+   with `deadline=NOW`, then the answer, so mail that arrives during triage
+   joins the answer's context. Replies and announcements are mail to a
+   singleton `telegram-outbox` session whose handler calls the Bot API
+   (at-least-once). Deviation from the plan: triage is a phase inside the
+   conversation session, not a per-event session, because every event
+   (chatter included) must reach the conversation anyway: it is the history.
+   The `A, B` mailbox hop is conversation to outbox. `deployment.py` and
+   `config.py` were left alone; Second Brain imports them (see step 5).
+   Tests: `tests/test_telegram_integration.py`.
 3. **Pipe** (subagent). State-backed exchange helper as a library module;
    port `spawn_supervisor.py` and `waiting_session.py` onto `context.spawn`
    plus `request`/`reply`. Closes NOW.md item 3 (two travel sessions).
@@ -274,8 +282,17 @@ backend does not change.
    `mailbox.py`, `redis_mailbox.py`, `ingress.py`, `monitors.py`,
    `conversation.py` and the graph versions of `agent.py`/`deployment.py` to
    `legacy/` with their tests still running there. Rewrite the README thesis:
-   the remaining plan is session state. Delete `legacy/` once Second Brain,
-   the consumer NOW.md names, runs on the new core.
+   the remaining plan is session state. **Constraint found 2026-10-05:**
+   Second Brain imports `entourage.runtime` (`QueueRuntime`, graph stores,
+   ready queue), `entourage.mailbox.InMemoryMailbox`, `capabilities`,
+   `builtin_capabilities`, `config.load_agent_manifest`, `deployment`
+   (`load_tools`, `import_object`), `runner.Shard`, `invocation` and
+   `sessions`. So the move cannot change import paths until Second Brain's
+   graph consumers are ported; keep the old modules importable (or leave
+   thin re-export shims) until then. `capabilities`, `invocation`, `runner`
+   and `sessions` have no graph dependency and stay as they are. Delete
+   `legacy/` once Second Brain, the consumer NOW.md names, runs on the new
+   core.
 
 Deliberately skipped until a consumer asks: the plan helper, strict waits in
 the backend, multi-host backends.

@@ -118,15 +118,25 @@ class SessionIngress:
             return f"{alias}:{conversation}"
         return member.session or alias
 
-    def deliver(self, alias: str, event: dict, *,
-                conversation: Optional[str] = None) -> Delivery:
+    def ensure(self, alias: str, *, conversation: Optional[str] = None,
+               event: Optional[dict] = None) -> Delivery:
+        """Create the session an event would reach, without appending anything.
+
+        For an adapter that hands the event to another session first (a
+        per-event triage that forwards to the conversation): the forwarding
+        publication needs its destination to exist at commit time.
+        """
         member = self._members[alias]
-        session_id = self.route(alias, event, conversation=conversation)
-        created = False
+        session_id = self.route(alias, event or {"event_id": "-"}, conversation=conversation)
         try:
             self.store.create(session_id, member.executable, deepcopy(member.initial_state))
             created = True
         except SessionAlreadyExists:
-            pass
-        appended = self.store.append(session_id, event)
-        return Delivery(session_id, created, appended)
+            created = False
+        return Delivery(session_id, created, False)
+
+    def deliver(self, alias: str, event: dict, *,
+                conversation: Optional[str] = None) -> Delivery:
+        ensured = self.ensure(alias, conversation=conversation, event=event)
+        appended = self.store.append(ensured.session_id, event)
+        return Delivery(ensured.session_id, ensured.created, appended)

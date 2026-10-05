@@ -102,6 +102,17 @@ def test_concurrent_deliveries_for_a_new_key_have_one_creator_and_lose_no_mail(t
     assert len(activation.events) == 4
 
 
+def test_ensure_creates_the_destination_without_mail(ingress):
+    router, store = ingress
+    first = router.ensure("chat", conversation="tg:42")
+    again = router.ensure("chat", conversation="tg:42")
+    assert first.session_id == "chat:tg:42" and first.created and not first.appended
+    assert not again.created
+    assert store.inspect("chat:tg:42")["state"] == {"phase": "ready"}
+    assert router.deliver("chat", event("m1"), conversation="tg:42").created is False
+    assert router.ensure("triage", event=event("m9")).session_id == "triage:m9"
+
+
 def test_member_validation():
     with pytest.raises(ValueError, match="keying"):
         Member("x", "x:v1", "per-task")

@@ -14,10 +14,11 @@ The other examples all run on the same dispatcher and SQLite store:
 | Area | Examples |
 | --- | --- |
 | Interactive agents | [cli.py](cli.py), [coding_agent.py](coding_agent.py): one model call per activation, tools inline, the conversation is session state |
-| Transports | [telegram_group_manager.py](telegram_group_manager.py): one session per chat, triage and answer as checkpointed phases, an outbox session for delivery |
-| Children and waiting | [spawn_supervisor.py](spawn_supervisor.py): fork-join, supervisor join with a death notice, impatience; [waiting_session.py](waiting_session.py): the three wake sources |
+| Transports | [telegram_group_manager.py](telegram_group_manager.py): one session per chat, triage as a phase or as a per-event labeling session, an outbox session for delivery |
+| Children and waiting | [spawn_supervisor.py](spawn_supervisor.py): fork-join, supervisor join with a death notice, impatience; [waiting_session.py](waiting_session.py): the three wake sources; [remote_tool_ingress.py](remote_tool_ingress.py): a remote reply in time and too late |
+| Failure policy | [retry_timeout.py](retry_timeout.py): attempt limits, backoff, a stale commit after lease expiry |
 | Shard runner | [shard/](shard/): agent folders launched and supervised by `python -m entourage.runner` |
-| Older graph runtime | [remote_tool_ingress.py](remote_tool_ingress.py), [retry_timeout.py](retry_timeout.py), [mailbox_cli.py](mailbox_cli.py): in-memory graph backends, kept until the sweep in [mailbox-first scheduling](../docs/mailbox-first-scheduling.md#migration) |
+| Older mailbox prototype | [mailbox_cli.py](mailbox_cli.py): process-local `InMemoryMailbox` checkpoints, retired with that module per [mailbox-first scheduling](../docs/mailbox-first-scheduling.md#migration) |
 
 Run them from the repository root, for example `python examples/spawn_supervisor.py`.
 The chat examples take `--model` for your configured provider; `--help` makes no

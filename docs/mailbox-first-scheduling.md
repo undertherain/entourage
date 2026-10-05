@@ -148,14 +148,18 @@ conversation continuity lives outside the graph (`ContinuousConversation`,
 stateless; generation is per conversation, needs history, coalesces messages
 arriving mid-work, absorbs steering.
 
-Mailbox-first:
+Mailbox-first (built 2026-10-05, both triage shapes in the example):
 
-- **Triage**: per-event session (ingress keying), a tiny plan ending in a
-  publication to `conversation:<chat_id>`.
-- **Conversation agent**: per-conversation session, interruptible turns; its tool
-  loop inside a turn is a plan.
-- **Send**: a committed publication to a Telegram outbox address, delivered by an
-  adapter.
+- **Conversation agent**: per-conversation session holding the typed history;
+  turns are two checkpointed phases (triage, answer) so mail arriving during
+  triage joins the answer. Interruptible by construction.
+- **Triage**: either the first phase of that turn (one call per batch, sees the
+  conversation) or a per-event session that labels and forwards each message
+  (parallel, stateless, no triage model in the chat). Both deliver every event
+  to the conversation: the chat needs chatter as context, so the split labels
+  rather than filters.
+- **Send**: a committed publication to a Telegram outbox session, delivered by
+  its handler (at-least-once).
 - "Insert approval before Send" becomes address rerouting
   (outbox → approval → outbox) instead of a plan splice, and works across
   sessions.
@@ -266,10 +270,15 @@ backend does not change.
    with `deadline=NOW`, then the answer, so mail that arrives during triage
    joins the answer's context. Replies and announcements are mail to a
    singleton `telegram-outbox` session whose handler calls the Bot API
-   (at-least-once). Deviation from the plan: triage is a phase inside the
-   conversation session, not a per-event session, because every event
-   (chatter included) must reach the conversation anyway: it is the history.
-   The `A, B` mailbox hop is conversation to outbox. `deployment.py` and
+   (at-least-once). Two triage shapes are kept side by side to see which
+   sticks (`GROUP_MANAGER_TRIAGE`): *phase*, triage as the first phase of the
+   chat's turn, one call per batch with the conversation as context; and
+   *session*, a per-event triage session that labels each message
+   `trigger: true|false` and forwards it, so the chat session never runs a
+   triage model and answers when a batch holds a trigger. Every event reaches
+   the chat either way, because the chat's state is the history; the split
+   relabels, it does not filter. The split needs `SessionIngress.ensure` so
+   the chat session exists before triage forwards to it. `deployment.py` and
    `config.py` were left alone; Second Brain imports them (see step 5).
    Tests: `tests/test_telegram_integration.py`.
 3. **Pipe** (subagent). *Done 2026-10-05.* `entourage/exchanges.py` keeps the
@@ -282,9 +291,16 @@ backend does not change.
    `examples/waiting_session.py` shows the three wake sources. Tests:
    `tests/test_exchanges.py`. NOW.md item 3 (two travel sessions) is covered
    by the parent-and-children test rather than a travel-themed demo.
-4. **Sweep.** `remote_tool_ingress.py` onto `session_ingress`;
-   `retry_timeout.py` onto definition attempts plus handler policy, or dropped;
-   monitors and actors retired as decided above.
+4. **Sweep.** *Done 2026-10-05.* `examples/remote_tool_ingress.py`: the
+   session is the return address, a late result is ambient mail after the
+   deadline dropped the exchange; no ingress router is needed because
+   `reply_to` names the session. `examples/retry_timeout.py`: per-definition
+   `max_attempts` with backoff, a permanently failing step parked `failed`,
+   and a step that outlives its lease losing its commit to the retry.
+   `mailbox_cli.py` is not ported: the chat examples already coalesce
+   interjections at checkpoints; it retires with `entourage.mailbox` in
+   step 5. Monitors and actors are retired as decided above. Tests:
+   `tests/test_session_examples.py`.
 5. **Retire.** Move `entourage/runtime/`, `flow.py`, `transition.py`,
    `mailbox.py`, `redis_mailbox.py`, `ingress.py`, `monitors.py`,
    `conversation.py` and the graph versions of `agent.py`/`deployment.py` to

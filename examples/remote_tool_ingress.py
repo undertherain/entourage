@@ -1,120 +1,102 @@
-"""
-Transport-neutral ingress — a remote tool call that parks and resumes.
+"""A remote tool call that parks and resumes, and a result that arrives late.
 
-This script uses an in-memory graph/mailbox and a fake service thread. It does
-not contact a remote endpoint or demonstrate crash recovery.
-
-The graph never learns what the transport is. A node dispatches a command
-and returns a plan that parks on the *derived await conversation*
-``corr:{correlation_id}``; whatever delivers the result — Astral subject,
-HTTP webhook, Redis stream, or the fake thread below — reduces it to a
-normalized ``InboundEvent`` and hands it to the ``IngressRouter``. The
-router resolves the destination at ingress:
-
-    explicit route → live corr:{id} waiter → transport hint → default inbox
-
-so the same event that resumes a parked join today would, arriving after
-the wait gave up, fall through to the resident inbox as ambient instead of
-stranding (no registration, no cancellation protocol — the await's route
-is derived from who is actually waiting).
+The session is the return address. A handler stages a request with
+`reply_to` set to its own session, parks with a deadline, and whatever
+delivers the result (an Astral subject, a webhook, a poller, or the fake
+thread below) appends it to that session. No routing table: the exchange
+table in state (`entourage.exchanges`) tells a matched reply from anything
+else, so a result arriving after the waiter gave up is ordinary mail for
+the next turn instead of a stranded message.
 
 Two acts:
 
-  1. the result arrives in time  → the parked join resumes, "inline call";
-  2. the result arrives too late → the join timed out and moved on; the
-     late result lands in the default inbox for the next resident turn.
+  1. the result arrives in time  → the reply resumes the parked turn, as
+     if the call had been inline;
+  2. the result arrives too late  → the deadline woke the session first,
+     it dropped the exchange and moved on; the late result lands as
+     ambient mail on the next wake.
 
 Run:  python examples/remote_tool_ingress.py
 """
 
-import logging
+import tempfile
 import threading
 import time
+from pathlib import Path
 
-from entourage.flow import Sequence, WaitForMailbox
-from entourage.ingress import InboundEvent, IngressRouter, correlation_conversation
-from entourage.runtime import Runtime
-
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+from entourage.exchanges import Exchanges
+from entourage.executables import Dispatcher, Executable
+from entourage.sessions import LocalSessions
 
 
 class FakeRemoteService:
-    """Stands in for any transport: takes a command, replies via the router.
+    """Stands in for any transport: takes a request event, replies by append.
 
-    A real adapter (Astral subscription, webhook endpoint, poller) does
-    exactly this — normalize what it received into an InboundEvent and
-    call ``router.accept``. A real adapter must use durable destination storage
-    before acknowledging its transport; this example's in-memory storage is not
-    sufficient for that guarantee. Swapping this class for a webhook changes nothing in
-    the graph, the tool, or the router.
+    A real adapter must append to durable storage before acknowledging its
+    transport; `LocalSessions.append` is that durable, idempotent step.
     """
 
-    def __init__(self, router, latency):
-        self.router = router
+    def __init__(self, store, latency):
+        self.store = store
         self.latency = latency
 
-    def submit(self, command):
-        threading.Thread(target=self._work, args=(command,)).start()
+    def submit(self, request):
+        threading.Thread(target=self._work, args=(request,)).start()
 
-    def _work(self, command):
+    def _work(self, request):
         time.sleep(self.latency)
-        delivered_to = self.router.accept(InboundEvent(
-            event_id=f"result-{command['correlation_id']}",
-            kind="result",
-            source="weather-service",
-            payload={"forecast": "rain in Tokyo"},
-            correlation_id=command["correlation_id"],
-        ))
-        print(f"    (transport delivered the result → {delivered_to!r})")
+        self.store.append(request["reply_to"], {
+            "event_id": f"result:{request['request_id']}", "kind": "result",
+            "source": "weather-service", "request_id": request["request_id"],
+            "payload": {"forecast": "rain in Tokyo"},
+        })
+        print("    (transport delivered the result to the session)")
 
 
-def make_nodes(service, correlation, join_timeout):
-    def dispatch(state):
-        print(f"    dispatch: sending command, will join on corr:{correlation}")
-        service.submit({"command": "get_weather", "correlation_id": correlation})
-        plan = Sequence(
-            WaitForMailbox(
-                conversation=correlation_conversation(correlation),
-                timeout=join_timeout,
-            ),
-            report,
-        )
-        return {**state, "dispatched": True}, plan
-
-    def report(state):
-        (event,) = state["events"]
-        if event["kind"] == "result":
-            print(f"    report: {event['payload']['forecast']} "
-                  f"(as if it were an inline tool call)")
-        else:
-            print("    report: remote tool did not answer in time — moving on")
-        return state
-
-    return dispatch
-
-
-def run_act(latency, join_timeout, correlation):
-    rt = Runtime()
-    router = IngressRouter(
-        rt.mailbox,
-        default_conversation="agent:inbox",
-        waiting_conversations=rt.waiting_conversations,
-        wake=rt.wake_due_waits,
-    )
-    service = FakeRemoteService(router, latency=latency)
-    rt.start_session(Sequence(make_nodes(service, correlation, join_timeout)))
-    rt.run()
-    time.sleep(max(0.0, latency + 0.2))   # let a straggler result land
-    leftover = rt.mailbox.claim("agent:inbox", consumer="probe")
-    if leftover:
-        print(f"    inbox: late {leftover[0]['kind']!r} event waits for the "
-              f"next resident turn ({leftover[0]['payload']['forecast']!r})")
-    else:
-        print("    inbox: empty — the result was consumed by the join")
+def make_agent(join_timeout):
+    def resume(context, state, mail):
+        exchanges = Exchanges(state)
+        incorporated = [event["event_id"] for event in mail]
+        if state.get("phase", "start") == "start":
+            exchanges.request(context, "weather-service", {"command": "get_weather"},
+                              key="op", label="forecast")
+            print(f"    dispatch: requested the forecast, waiting up to {join_timeout}s")
+            state["phase"] = "waiting"
+            return context.propose(state, incorporated=incorporated,
+                                   deadline=time.time() + join_timeout)
+        replies, others = exchanges.ingest(mail)
+        for reply in replies:
+            print(f"    report: {reply.payload['forecast']} (as if it were an inline tool call)")
+        for event in others:
+            if event["kind"] == "system" and event.get("source") == "timer" and exchanges:
+                print(f"    report: no answer in time, dropping {exchanges.drop('weather-service')!r} "
+                      "and moving on")
+            elif event["kind"] == "result":
+                print(f"    inbox: late result {event['payload']['forecast']!r} is ambient mail "
+                      "for this turn, not a resumed call")
+        return context.propose(state, incorporated=incorporated)
+    return resume
 
 
-print("Act 1 — the result beats the join timeout (fast remote):")
-run_act(latency=0.2, join_timeout=5.0, correlation="op-fast")
+def run_act(latency, join_timeout):
+    with tempfile.TemporaryDirectory() as folder:
+        store = LocalSessions(Path(folder) / "sessions.db")
+        service = FakeRemoteService(store, latency)
+        # The service session exists only as an address; the fake thread reads its inbox.
+        store.bind_definition("weather-service:v1", {})
+        store.create("weather-service", "weather-service:v1", {})
+        dispatcher = Dispatcher(store).register(Executable("agent:v1", make_agent(join_timeout)))
+        dispatcher.create("agent", "agent:v1", {})
+        dispatcher.run_until_idle()
+        request = store.claim(executable="weather-service:v1").events[0]
+        service.submit(request)
+        stop = threading.Event()
+        threading.Timer(max(latency, join_timeout) + 0.3, stop.set).start()
+        dispatcher.run_forever(stop, poll_interval=0.02)
 
-print("\nAct 2 — the join gives up first; the late result falls through:")
-run_act(latency=1.0, join_timeout=0.3, correlation="op-slow")
+
+print("Act 1 — the result beats the deadline (fast remote):")
+run_act(latency=0.1, join_timeout=1.0)
+
+print("\nAct 2 — the deadline passes first; the late result falls through:")
+run_act(latency=0.5, join_timeout=0.1)

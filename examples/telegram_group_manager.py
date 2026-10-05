@@ -8,6 +8,16 @@ joins the answer's context: the phase boundary is a commit, not a sleep.
 Replies and announcements are mail to a `telegram-outbox` session whose
 handler calls the Bot API, so delivery is a separate, at-least-once step.
 
+Two triage shapes, chosen with GROUP_MANAGER_TRIAGE:
+
+    phase    (default) triage is the first phase of the chat session's turn:
+             one cheap call per batch, with the conversation as context.
+    session  triage is a per-event session (parallel, stateless) that labels
+             each user message `trigger: true|false` and forwards it to the
+             chat session, which answers when a batch holds a trigger and
+             never runs a triage model itself. The adapter must `ensure` the
+             chat session before delivering to triage.
+
 Environment:
     TELEGRAM_BOT_TOKEN
     TELEGRAM_ALLOWED_CHAT_IDS       comma-separated, fails closed
@@ -16,6 +26,7 @@ Environment:
     GROUP_MANAGER_MODEL             default gpt-5-nano
     GROUP_MANAGER_TRIAGE_MODEL      defaults to GROUP_MANAGER_MODEL
     GROUP_MANAGER_DATA_DIR          default data/telegram-group-manager
+    GROUP_MANAGER_TRIAGE            phase (default) or session
 
 Commands in the optional CLI composer:
     TEXT                 user message entering the same group conversation
@@ -40,8 +51,13 @@ from entourage.sessions import LocalSessions
 from entourage.turn import NOW
 
 GROUP = "group-manager:v1"
+TRIAGE = "group-triage:v1"
 OUTBOX = "telegram-outbox:v1"
 OUTBOX_SESSION = "telegram-outbox"
+MEMBERS = [
+    Member("group", GROUP, "conversation", initial_state={"events": [], "phase": "idle"}),
+    Member("triage", TRIAGE, "event"),
+]
 
 SYSTEM_PROMPT = """\
 You are {bot_name}, a helpful member of a Telegram group. Respond naturally and
@@ -75,6 +91,11 @@ def default_triage(model, bot_name, messages):
     return _content(response).upper().startswith("YES")
 
 
+def default_classify(model, bot_name, text):
+    """Stateless per-message triage for the session-keyed variant."""
+    return default_triage(model, bot_name, [{"role": "user", "content": text}])
+
+
 def default_answer(model, bot_name, messages):
     from litellm import completion
 
@@ -102,8 +123,10 @@ class GroupManager:
     """Resume handler for one chat: ingest, triage, checkpoint, answer.
 
     State: `events` (bounded typed history), `phase` (`idle` or `answer`),
-    `pending_user` (a user message is waiting for triage) and `replies`
-    (counter that keys publications stably across retries).
+    `pending_user` (a user message is waiting for triage), `pending_trigger`
+    (a pre-labeled message asked for an answer) and `replies` (counter that
+    keys publications stably across retries). With `triage=None` the handler
+    runs no triage model and trusts the `trigger` label on incoming mail.
     """
 
     def __init__(self, triage=default_triage, answer=default_answer, *, model="gpt-5-nano",
@@ -130,9 +153,11 @@ class GroupManager:
             if kind not in {"user", "ambient", "subagent"}:
                 raise ValueError(f"unexpected mail {event['event_id']!r} of kind {kind!r}")
             events.append(event)
+            payload = event.get("payload", {})
             if kind == "user":
                 state["pending_user"] = True
-            payload = event.get("payload", {})
+                if payload.get("trigger"):
+                    state["pending_trigger"] = True
             if payload.get("deliver") == "telegram":
                 self._deliver(context, events, payload["chat_id"], payload["content"],
                               key=f"announce:{event['event_id']}")
@@ -144,8 +169,12 @@ class GroupManager:
             if not state.get("pending_user"):
                 return context.propose(state, incorporated=incorporated)
             state["pending_user"] = False
-            self.output("agent: inspecting group context")
-            if not self.triage(self.triage_model, self.bot_name, context_messages):
+            if self.triage is None:
+                wanted = state.pop("pending_trigger", False)
+            else:
+                self.output("agent: inspecting group context")
+                wanted = self.triage(self.triage_model, self.bot_name, context_messages)
+            if not wanted:
                 self.output("agent: triage says no reply")
                 return context.propose(state, incorporated=incorporated)
             state["phase"] = "answer"
@@ -178,6 +207,34 @@ class GroupManager:
         return None
 
 
+class TriageAgent:
+    """Per-event triage session: label one user message and forward it to its chat.
+
+    Stateless and parallel across messages. The chat session must already
+    exist (`ingress.ensure`) because the forwarding publication is committed
+    with this session's completion.
+    """
+
+    def __init__(self, classify=default_classify, *, model="gpt-5-nano", bot_name="Alexander",
+                 output=print):
+        self.classify = classify
+        self.model = model
+        self.bot_name = bot_name
+        self.output = output
+        self.router = SessionIngress(None, MEMBERS)
+
+    def resume(self, context, state, mail):
+        for event in mail:
+            if event.get("kind") != "user":
+                raise ValueError(f"triage expects user mail, got {event.get('kind')!r}")
+            payload = dict(event["payload"])
+            payload["trigger"] = bool(self.classify(self.model, self.bot_name, payload["content"]))
+            chat = self.router.route("group", event, conversation=conversation(payload["chat_id"]))
+            context.send(chat, payload, key=event["event_id"], kind="user")
+            self.output(f"triage: {payload['content']!r} -> trigger={payload['trigger']}")
+        return context.propose(state, incorporated=[e["event_id"] for e in mail], complete=True)
+
+
 class TelegramOutbox:
     """Delivery adapter session: each mail event is one Bot API call.
 
@@ -202,8 +259,7 @@ class TelegramOutbox:
 
 
 def ingress(store):
-    return SessionIngress(store, [Member("group", GROUP, "conversation",
-                                         initial_state={"events": [], "phase": "idle"})])
+    return SessionIngress(store, MEMBERS)
 
 
 def conversation(chat_id):
@@ -244,11 +300,13 @@ def parse_cli(text, chat_id):
         **base, "content": text, "reply_target": {"channel": "telegram", "chat_id": chat_id}}}
 
 
-def build_dispatcher(store, manager, outbox, **options):
-    """Register both definitions and make sure the outbox session exists."""
+def build_dispatcher(store, manager, outbox, triage=None, **options):
+    """Register the definitions and make sure the outbox session exists."""
     dispatcher = Dispatcher(store, **options)
     dispatcher.register(Executable(GROUP, manager.resume, development=True))
     dispatcher.register(Executable(OUTBOX, outbox.resume, development=True))
+    if triage is not None:
+        dispatcher.register(Executable(TRIAGE, triage.resume, development=True))
     if not store.list_sessions(executable=OUTBOX):
         dispatcher.create(OUTBOX_SESSION, OUTBOX, {})
     return dispatcher
@@ -275,19 +333,30 @@ def main():
     data_dir = Path(os.environ.get("GROUP_MANAGER_DATA_DIR", "data/telegram-group-manager"))
     data_dir.mkdir(parents=True, exist_ok=True)
     store = LocalSessions(data_dir / "sessions.db")
-    manager = GroupManager(model=os.environ.get("GROUP_MANAGER_MODEL", "gpt-5-nano"),
-                           triage_model=os.environ.get("GROUP_MANAGER_TRIAGE_MODEL"),
-                           bot_name=os.environ.get("TELEGRAM_BOT_NAME", "Alexander"))
+    model = os.environ.get("GROUP_MANAGER_MODEL", "gpt-5-nano")
+    triage_model = os.environ.get("GROUP_MANAGER_TRIAGE_MODEL") or model
+    bot_name = os.environ.get("TELEGRAM_BOT_NAME", "Alexander")
+    split = os.environ.get("GROUP_MANAGER_TRIAGE", "phase") == "session"
+    manager = GroupManager(triage=None if split else default_triage, model=model,
+                           triage_model=triage_model, bot_name=bot_name)
+    triage = TriageAgent(model=triage_model, bot_name=bot_name) if split else None
     dispatcher = build_dispatcher(store, manager, TelegramOutbox(TelegramSender().send),
-                                  lease_seconds=120)
+                                  triage, lease_seconds=120)
     router = ingress(store)
+
+    def deliver(event, chat_id):
+        key = conversation(chat_id)
+        if split and event["kind"] == "user":
+            router.ensure("group", conversation=key)
+            router.deliver("triage", event)
+        else:
+            router.deliver("group", event, conversation=key)
     stop = threading.Event()
     threading.Thread(target=dispatcher.run_forever, args=(stop,),
                      kwargs={"poll_interval": 0.2}, daemon=True).start()
 
     def on_telegram(message):
-        key, event = telegram_event(message)
-        router.deliver("group", event, conversation=key)
+        deliver(telegram_event(message)[1], message["chat_id"])
 
     threading.Thread(target=TelegramListener(on_telegram, allowed_chat_ids=allowed).run,
                      daemon=True).start()
@@ -295,7 +364,8 @@ def main():
     session = PromptSession(history=InMemoryHistory(),
                             style=Style.from_dict({"frame": "bold ansicyan",
                                                    "hint": "ansibrightblack"}))
-    print(f"Group manager running; CLI events join {conversation(cli_chat)}")
+    print(f"Group manager running ({'session' if split else 'phase'} triage); "
+          f"CLI events join {conversation(cli_chat)}")
     with patch_stdout(raw=True):
         while True:
             try:
@@ -310,7 +380,7 @@ def main():
             if text == "/quit":
                 stop.set()
                 break
-            router.deliver("group", parse_cli(text, cli_chat), conversation=conversation(cli_chat))
+            deliver(parse_cli(text, cli_chat), cli_chat)
 
 
 if __name__ == "__main__":

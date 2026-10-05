@@ -6,6 +6,7 @@ from entourage.sessions import LocalSessions
 from examples.telegram_group_manager import (
     GroupManager,
     TelegramOutbox,
+    TriageAgent,
     build_dispatcher,
     event_messages,
     ingress,
@@ -222,6 +223,43 @@ def test_group_demo_mirrors_announcement_and_records_receipt(tmp_path):
 
     assert demo.events() == [("ambient", "hourly summary"), ("delivery", "hourly summary")]
     assert demo.sent == [("42", "hourly summary")]
+
+
+def test_session_triage_labels_forwards_and_the_chat_answers_on_a_trigger(tmp_path):
+    store = LocalSessions(tmp_path / "sessions.db", clock=lambda: 100.0)
+    sent, output = [], []
+    manager = GroupManager(None, lambda *_: "the answer", output=output.append)
+    triage = TriageAgent(lambda _m, _n, text: "Alexander" in text, output=output.append)
+    worker = build_dispatcher(store, manager, TelegramOutbox(
+        lambda chat_id, text: sent.append((chat_id, text)) or {"result": {}}), triage)
+    assert worker.run_once().session_id == "telegram-outbox"
+    router = ingress(store)
+
+    def user(content):
+        event = {"event_id": f"event:{content}", "kind": "user", "source": "telegram",
+                 "payload": {"sender": "alex", "content": content, "chat_id": "42",
+                             "reply_target": {"channel": "telegram", "chat_id": "42"}}}
+        router.ensure("group", conversation="telegram:42")
+        return router.deliver("triage", event)
+
+    assert user("lunch anyone?").session_id == "triage:event:lunch anyone?"
+    user("Alexander, what time is it?")
+    for result in worker.run_until_idle():
+        assert result.committed, result.error
+
+    assert store.inspect("triage:event:lunch anyone?")["status"] == "complete"
+    chat = store.inspect(CHAT)["state"]
+    assert [(e["kind"], e["payload"].get("trigger")) for e in chat["events"]][:2] == [
+        ("user", False), ("user", True)]
+    assert [e["kind"] for e in chat["events"]] == ["user", "user", "delivery", "assistant"]
+    assert sent == [("42", "the answer")]
+    assert "agent: inspecting group context" not in output  # no triage model in the chat
+
+    user("more chatter")
+    for result in worker.run_until_idle():
+        assert result.committed, result.error
+    assert sent == [("42", "the answer")]
+    assert [e["kind"] for e in store.inspect(CHAT)["state"]["events"]][-1] == "user"
 
 
 def test_unknown_mail_fails_the_activation(tmp_path):

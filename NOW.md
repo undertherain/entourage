@@ -12,11 +12,12 @@ and publication history; its July “current direction” is not the current bui
 is retired in five steps, each a commit with its own proof. No backend changes:
 exchanges and strict joins are handler-side state, one activation per node by
 default, the plan helper is deferred until a consumer needs runtime splicing.
-Progress: steps 1 to 3 done (`entourage/turn.py`, `entourage/exchanges.py`,
-`runner.notify_failures`; `cli.py`, `coding_agent.py`,
-`telegram_group_manager.py`, `spawn_supervisor.py`, `waiting_session.py` on
-the dispatcher); step 4 (sweep) next. Second Brain still imports the graph
-runtime, so step 5 keeps import paths. The earlier
+Progress: steps 1 to 4 done (`entourage/turn.py`, `entourage/exchanges.py`,
+`runner.notify_failures`, `SessionIngress.ensure`; all standalone examples
+except `mailbox_cli.py` run on the dispatcher; the Telegram demo carries both
+triage shapes, phase and per-event session, to see which sticks); step 5
+(retire) next. Second Brain still imports the graph runtime, so step 5 keeps
+import paths. The earlier
 direction below stays as history; its item 2 is superseded.
 
 Entourage owns a graph-independent execution core shared by graph workflows and

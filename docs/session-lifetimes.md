@@ -52,6 +52,9 @@ delivery.session_id, delivery.created, delivery.appended
 
 `route` derives the ID without touching storage. `deliver` creates the session
 on first use with a copy of `initial_state` and appends the event idempotently.
+`ensure` does only the creation, for an adapter that hands the event to another
+session first (per-event triage forwarding to the conversation): a publication's
+destination must exist when the forwarding session commits.
 An existing session is never reset, so restart and concurrent adapters are safe:
 one creator wins and every delivery appends. Creation and append are two backend
 operations; a crash between them leaves a mail-less ready session whose first

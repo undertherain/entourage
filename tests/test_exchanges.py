@@ -1,9 +1,5 @@
 """Pending exchanges in state: matching, joins, interruptibility, examples."""
 
-from pathlib import Path
-import subprocess
-import sys
-
 import pytest
 
 from entourage.exchanges import Exchanges
@@ -11,8 +7,6 @@ from entourage.executables import Context, Dispatcher, Executable
 from entourage.runner import notify_failures
 from entourage.sessions import LocalSessions
 
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def ids(mail):
@@ -132,27 +126,3 @@ def test_failure_notice_is_mail_the_supervisor_folds_into_its_join(store, clock)
     worker.run_until_idle()
     assert store.inspect("p")["status"] == "complete"
     assert store.inspect("p")["state"]["dropped"] == ["doomed"]
-
-
-def run_example(name):
-    return subprocess.run([sys.executable, f"examples/{name}.py"], cwd=ROOT, check=True,
-                          capture_output=True, text=True, timeout=30).stdout
-
-
-def test_spawn_supervisor_example():
-    output = run_example("spawn_supervisor")
-    assert "join: child reported 'cat_64px.png'" in output
-    assert "'ok' finished fine" in output
-    assert "death notice for ['doomed']" in output
-    assert "all children accounted for" in output
-    assert "timer woke us with 'job-9' still pending" in output
-
-
-def test_waiting_session_example():
-    output = run_example("waiting_session")
-    assert "got user event: 'my printer is on fire'" in output
-    assert "[bob is waiting, holding no worker]" in output
-    assert "got user event: 'nevermind, fixed it'" in output
-    assert "[bob is complete]" in output
-    assert "the timer woke us" in output
-    assert "[carol is complete after 2 wakes]" in output

@@ -1,107 +1,87 @@
-"""
-Retry & timeout controls on nodes — no external services needed.
+"""Attempt limits, backoff and lease expiry on the session dispatcher.
 
-Wrap any plan leaf in ``flow.Node(...)`` to attach an execution policy:
-
-    Node("call_api", max_attempts=4, timeout=2.0, retry_delay=0.3)
-
-- ``max_attempts``: total tries before the execution — and its session —
-  is marked failed (default 1, i.e. no retry);
-- ``timeout``: wall-clock seconds per attempt, a timed-out attempt counts
-  as a failed one;
-- ``retry_delay``: seconds to hold a failed attempt back before re-enqueue.
-
-This in-memory graph example uses thread-based timeouts: the runtime stops
-waiting for an attempt, but its thread keeps running. It does not kill a stuck
-process. Subprocess isolation is separate work for the shard runner.
-
-The policy is stored on the execution in the GraphStore, so in a
-multi-worker deployment every worker honors it no matter which worker
-expanded the plan. The same policy can also be registered as a per-name
-default: ``runtime.register_node("call_api", fn, max_attempts=3)``.
+Policy is per definition, not per node: `Dispatcher.register(executable,
+lease_seconds=..., max_attempts=...)`. One activation is one step. A step
+that raises is released at once with its error and an exponential backoff
+(never above the lease); the store counts attempts and parks the session as
+`failed` when the limit is reached. A step that outlives its lease loses its
+commit authority: the retry wins, the slow attempt's commit is rejected. The
+dispatcher cannot kill a blocked Python call; the shard runner kills the
+worker process instead.
 
 Run:  python examples/retry_timeout.py
 """
 
-import logging
+import tempfile
 import time
+from pathlib import Path
 
-from entourage.flow import Node, Sequence
-from entourage.runtime import Runtime
-
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
-
-
-# ── Nodes ─────────────────────────────────────────────────────
-
-class FlakyAPI:
-    """Simulates a transient outage: the first two calls raise."""
-
-    def __init__(self):
-        self.calls = 0
-
-    def __call__(self, state):
-        self.calls += 1
-        if self.calls <= 2:
-            print(f"    flaky_api: attempt {self.calls} → ConnectionError (transient)")
-            raise ConnectionError("upstream reset the connection")
-        print(f"    flaky_api: attempt {self.calls} → 200 OK")
-        return {**state, "data": "payload"}, None
+from entourage.executables import Dispatcher, Executable
+from entourage.sessions import LocalSessions
 
 
-def hanging_call(state):
-    """Simulates a call that never returns (e.g. a wedged C extension)."""
-    print("    hanging_call: started, will hang...")
-    time.sleep(60)
-    return state, None
+def flaky_api(context, state, mail):
+    """A transient outage: the first two attempts raise."""
+    if context.attempt <= 2:
+        print(f"    flaky_api: attempt {context.attempt} raises ConnectionError (transient)")
+        raise ConnectionError("upstream reset the connection")
+    print(f"    flaky_api: attempt {context.attempt} succeeds (last error was "
+          f"{context.last_error!r})")
+    return context.propose({**state, "data": "payload"},
+                           incorporated=[e["event_id"] for e in mail], complete=True)
 
 
-def report(state):
-    print(f"    report: got state {state}")
-    return {**state, "reported": True}, None
+def broken_api(context, state, mail):
+    print(f"    broken_api: attempt {context.attempt} raises")
+    raise RuntimeError("permanently misconfigured")
 
 
-def show(store, session_id, title):
-    print(f"\n  {title}")
-    session = store.get_session(session_id)
-    print(f"  session status: {session['status']}")
-    for ex in store.get_session_executions(session_id):
-        if ex["node_name"].startswith("__"):
-            continue  # skip HEAD/END sentinels
-        err = f", last_error={ex['last_error']!r}" if ex["last_error"] else ""
-        print(
-            f"    {ex['node_name']}: {ex['status']} "
-            f"(attempts={ex['attempts']}{err})"
-        )
+def slow_step(context, state, mail):
+    """The first attempt outlives its lease; its commit is then rejected."""
+    if context.attempt == 1:
+        print("    slow_step: attempt 1 is slow and outlives the 0.2s lease...")
+        time.sleep(0.3)
+    else:
+        print(f"    slow_step: attempt {context.attempt} is quick")
+    return context.propose({**state, "done_by_attempt": context.attempt},
+                           incorporated=[e["event_id"] for e in mail], complete=True)
 
 
-# ── 1. Transient failure, absorbed by retries ─────────────────
+def drain(dispatcher, store, session, *, timeout=5.0):
+    """Run until the session is complete or failed, waiting out backoffs."""
+    started = time.time()
+    while store.inspect(session)["status"] not in ("complete", "failed"):
+        for result in dispatcher.run_until_idle():
+            if not result.committed:
+                print(f"    [{result.session_id}: not committed: {result.error!r}]")
+        if time.time() - started > timeout:
+            raise TimeoutError(session)
+        time.sleep(0.05)
+    snapshot = store.inspect(session)
+    print(f"  {session}: {snapshot['status']}, state={snapshot['state']}")
 
-print("═══ 1. flaky API with max_attempts=4, retry_delay=0.3 ═══")
-flaky = FlakyAPI()
-rt = Runtime()
-sid = rt.start_session(
-    Sequence(
-        Node(flaky, max_attempts=4, retry_delay=0.3),
-        report,
-    ),
-    {"query": "hello"},
-)
-t0 = time.time()
-rt.run()
-show(rt.store, sid, f"finished in {time.time() - t0:.2f}s (two 0.3s retry delays)")
 
-# ── 2. Hung node, wait abandoned at timeout; retries exhausted ─
+def main():
+    with tempfile.TemporaryDirectory() as folder:
+        store = LocalSessions(Path(folder) / "sessions.db")
+        dispatcher = (Dispatcher(store)
+                      .register(Executable("flaky:v1", flaky_api), lease_seconds=0.2, max_attempts=4)
+                      .register(Executable("broken:v1", broken_api), lease_seconds=0.2, max_attempts=2)
+                      .register(Executable("slow:v1", slow_step), lease_seconds=0.2, max_attempts=3))
 
-print("\n═══ 2. hanging call with timeout=0.5, max_attempts=2 ═══")
-rt = Runtime()
-sid = rt.start_session(
-    Sequence(
-        Node(hanging_call, max_attempts=2, timeout=0.5),
-        report,  # never reached: exhaustion fails the session
-    ),
-    {},
-)
-rt.run()
-show(rt.store, sid, "both attempts timed out → terminal failure")
-print("\n  note: report never ran — a terminally failed node fails its session.")
+        print("═══ 1. flaky API with max_attempts=4: retries absorb the outage ═══")
+        dispatcher.create("flaky", "flaky:v1", {})
+        drain(dispatcher, store, "flaky")
+
+        print("\n═══ 2. broken API with max_attempts=2: parked as failed ═══")
+        dispatcher.create("broken", "broken:v1", {})
+        drain(dispatcher, store, "broken")
+        print(f"  last error: {store.inspect('broken')['last_error']!r}")
+
+        print("\n═══ 3. slow step with a 0.2s lease: the stale commit is rejected ═══")
+        dispatcher.create("slow", "slow:v1", {})
+        drain(dispatcher, store, "slow")
+
+
+if __name__ == "__main__":
+    main()

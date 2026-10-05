@@ -1,10 +1,20 @@
 # NOW — Entourage execution runtime
 
-Last updated: **2026-09-22**. Current implementation entry point. Read README.md
+Last updated: **2026-10-05**. Current implementation entry point. Read README.md
 for the existing graph model, then this file. TODO.md retains earlier research
 and publication history; its July “current direction” is not the current build plan.
 
 ## Agreed direction
+
+**2026-10-05: the session core is the only scheduler.** Decided in
+[mailbox-first scheduling](docs/mailbox-first-scheduling.md): the graph runtime
+(`QueueRuntime`, `flow.py` plans, `WaitForMailbox`, graph spawn and monitors)
+is retired in five steps, each a commit with its own proof. No backend changes:
+exchanges and strict joins are handler-side state, one activation per node by
+default, the plan helper is deferred until a consumer needs runtime splicing.
+Progress: step 1 done (`entourage/turn.py`, `examples/cli.py`,
+`examples/coding_agent.py`, `tests/test_turn.py`); step 2 (Telegram) next. The earlier
+direction below stays as history; its item 2 is superseded.
 
 Entourage owns a graph-independent execution core shared by graph workflows and
 mailbox-driven sessions. Register launchable executables, wake bounded activations,
@@ -122,9 +132,9 @@ Second Brain shard itself.
 1. Extend the local versioned registration/handler contract into a serialized
    activation/result protocol and reproducible executable packaging. Keep the
    runtime-owned commit boundary and separate definition/session/activation IDs.
-2. Done as worker processes sharing the store (no step protocol). Remaining:
-   reuse the worker for one original graph node before building a separate
-   graph worker manager.
+2. Done as worker processes sharing the store (no step protocol). *Superseded
+   2026-10-05:* graph nodes are not reused; the graph runtime is retired
+   ([migration](docs/mailbox-first-scheduling.md#migration)).
 3. Atomic child creation is done (`Context.spawn`, derived names). Remaining:
    durable exchange/reply handles and the demonstration of two travel sessions
    sharing code: delegate tour, ask user, persist and exit, answer, resume child,

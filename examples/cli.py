@@ -1,27 +1,30 @@
-"""Older graph-based chat loop with file-backed chat history.
+"""Chat loop on the session dispatcher: the conversation is session state.
 
-The execution graph is in memory. For explicit session checkpoint/restart, see
-examples/mailboxes/registered/README.md. Use --model for your configured provider.
+Each turn is one activation. Tool results are checkpointed before the next
+model call, so a chat survives a restart mid-turn and `store.inspect` shows
+the whole history. Answers are mail to a `ui` session whose handler prints
+them. `/new` starts a fresh session; long-term memory stays in a file.
+Use --model for your configured provider; --help makes no model calls.
 """
 
+import argparse
+import logging
 import os
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
-from entourage.runtime import Runtime
-from entourage.agent import PersistableAgent
-from entourage.tools import TavilySearchTool, MemoryTool
-from entourage.memory import ChatHistory, MemoryDB
 
-# Configuration
-class PersonaConfig:
-    def __init__(self, agent_name: str, user_name: str, persona_template: str, guidelines: str):
-        self.agent_name = agent_name
-        self.user_name = user_name
-        self.persona_template = persona_template
-        self.guidelines = guidelines
+from entourage.executables import Dispatcher, Executable
+from entourage.memory import MemoryDB
+from entourage.sessions import LocalSessions
+from entourage.tools import MemoryTool, TavilySearchTool
+from entourage.turn import ChatAgent, litellm_complete
 
-guidelines = """
+AGENT = "jarvis:v1"
+UI = "cli-ui:v1"
+
+GUIDELINES = """
 You are a conversational AI. Follow all instructions below precisely.
 ---
 ### CORE INSTRUCTIONS [EN]
@@ -32,140 +35,106 @@ You are a conversational AI. Follow all instructions below precisely.
 - Use your tools when you need to fetch external information or perform specific tasks like remembering user details.
 - After using a tool, it is critical that you proceed to fully address the user's original request, synthesizing the tool's output into your final answer. Do not get distracted by the tool-use process.
 """
+PERSONA = "You are Jarvis, a helpful assistant to Sasha."
+USER_NAME = "Aleksandr"
 
-name = "Jarvis"
-persona = "You are Jarvis, a helpful assistant to Sasha."
-APP_CONFIG = PersonaConfig(
-    agent_name=name,
-    user_name="Aleksandr",
-    persona_template=persona,
-    guidelines=guidelines,
-)
 
-class UserInputNode:
-    def __init__(self, config: PersonaConfig, history: ChatHistory, memory_db: MemoryDB, agent_node):
-        self.config = config
-        self.history = history
-        self.memory_db = memory_db
-        self.agent_node = agent_node # Circular dependency handling in flow construction would be better, but this works for simple loop
+def system_prompt(memory_db):
+    def build(context, state):
+        facts = [fact.split("] ", 1)[1] for fact in memory_db.get_all() if "] " in fact]
+        memory = ""
+        if facts:
+            memory = f"\n\nHere are facts you remember about {USER_NAME}:\n" + "\n".join(
+                f"- {fact}" for fact in facts)
+        return f"{PERSONA}\n\n{GUIDELINES}{memory}".strip()
+    return build
 
-    def __call__(self, state):
-        while True:
-            try:
-                print("> ", end="")
-                user_msg = input()
-            except EOFError:
-                return state, None # End session
-            if not user_msg:
-                continue
-            if user_msg.strip() == "/new":
-                new_id = self.history.start_new_session()
-                print(f"[Started new chat {new_id}]")
-                # clear state messages so the agent starts fresh
-                state["messages"] = []
-                continue
-            # Construct the full system prompt if it's a fresh start or ensure it's there
-            current_messages = self.history.get_messages()
-            if not current_messages or current_messages[0].get("role") != "system":
-                # Build system prompt
-                persona_prompt = self.config.persona_template.format(
-                    agent_name=self.config.agent_name, user_name=self.config.user_name
-                )
-                memories = self.memory_db.get_all()
-                memory_prompt_part = ""
-                if memories:
-                    facts = "\n".join(f"- {fact.split('] ')[1]}" for fact in memories if "] " in fact)
-                    memory_prompt_part = (
-                        f"\n\nHere are facts you remember about {self.config.user_name}:\n"
-                        + facts
-                    )
-                final_system_prompt = f"{persona_prompt}\n\n{self.config.guidelines}{memory_prompt_part}".strip()
-                updated_messages = [{"role": "system", "content": final_system_prompt}] + current_messages
-                self.history.set_messages(updated_messages)
 
-            self.history.append({"role": "user", "content": user_msg})
-            state["messages"] = self.history.get_messages()
-            return state, self.agent_node
+def print_answers(context, state, mail):
+    """The output adapter: a session whose only job is to deliver answers."""
+    for event in mail:
+        print(f"assistant: {event['payload']['text']}")
+    return context.propose(state, incorporated=[event["event_id"] for event in mail])
 
-    @property
-    def __name__(self):
-        return "UserInput"
+
+def show_recent(messages, debug):
+    for message in messages[-10:]:
+        role, content = message.get("role"), message.get("content")
+        if role == "system":
+            continue
+        if role == "tool" and not debug:
+            content = "[Tool output hidden]"
+        elif role == "assistant" and message.get("tool_calls") and not debug:
+            content = f"[Tool call: {message['tool_calls'][0]['function']['name']}]"
+        if content:
+            print(f"{role}: {content}")
+
+
+def latest_session(store):
+    open_sessions = [s for s in store.list_sessions(executable=AGENT) if s["status"] != "complete"]
+    return open_sessions[-1]["session_id"] if open_sessions else None
+
+
+def new_session(dispatcher):
+    session = f"chat:{uuid.uuid4().hex[:8]}"
+    dispatcher.create(session, AGENT, {"messages": []})
+    print(f"[Started new chat {session}]")
+    return session
+
+
+def run_ready(dispatcher):
+    for result in dispatcher.run_until_idle():
+        if not result.committed:
+            print(f"[Activation failed for {result.session_id}: {result.error}]")
+
+
+def main():
+    load_dotenv()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", default="claude-3-haiku-20240307", help="Model name to use")
+    parser.add_argument("--base-url", default=None, help="Base URL for the API")
+    parser.add_argument("--debug", action="store_true", help="Show tool calls and runtime logs")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO if args.debug else logging.WARNING,
+                        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+    base_dir = Path(os.path.expanduser("~/.entourage/jarvis"))
+    base_dir.mkdir(parents=True, exist_ok=True)
+    store = LocalSessions(base_dir / "sessions.db")
+    memory_db = MemoryDB(base_dir / "memory.txt")
+
+    agent = ChatAgent(litellm_complete(args.model, base_url=args.base_url),
+                      [TavilySearchTool(), MemoryTool(memory_db)],
+                      system_prompt=system_prompt(memory_db), output="ui")
+    # One lease must cover a model call plus its tools; there is no renewal.
+    dispatcher = Dispatcher(store, lease_seconds=120)
+    dispatcher.register(Executable(AGENT, agent.resume, development=True))
+    dispatcher.register(Executable(UI, print_answers, development=True))
+    if not store.list_sessions(executable=UI):
+        dispatcher.create("ui", UI, {})
+
+    session = latest_session(store)
+    if session:
+        print(f"[Loaded chat {session}]")
+        show_recent(store.inspect(session)["state"].get("messages", []), args.debug)
+        run_ready(dispatcher)  # finish a turn interrupted by the previous exit
+    else:
+        session = new_session(dispatcher)
+
+    while True:
+        try:
+            text = input("> ")
+        except EOFError:
+            return
+        if not text.strip():
+            continue
+        if text.strip() == "/new":
+            session = new_session(dispatcher)
+            continue
+        store.append(session, {"event_id": f"user:{uuid.uuid4().hex}", "kind": "user",
+                               "payload": {"text": text}})
+        run_ready(dispatcher)
+
 
 if __name__ == "__main__":
-    load_dotenv()
-    
-    import argparse
-    import logging
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="claude-3-haiku-20240307", help="Model name to use")
-    parser.add_argument("--base-url", type=str, default=None, help="Base URL for the API")
-    parser.add_argument("--debug", action="store_true", help="Enable model/tool and runtime logs")
-    args = parser.parse_args()
-
-    # Configure logging
-    log_level = logging.INFO if args.debug else logging.WARNING
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    
-    # Setup Paths
-    agent_name_lower = APP_CONFIG.agent_name.lower()
-    agent_base_dir = Path(os.path.expanduser(f"~/.entourage/{agent_name_lower}"))
-    agent_base_dir.mkdir(parents=True, exist_ok=True)
-    
-    chat_dir = agent_base_dir / "chats"
-    chat_dir.mkdir(parents=True, exist_ok=True)
-    
-    memory_path = agent_base_dir / "memory.txt"
-    memory_db = MemoryDB(memory_path)
-    
-    # Load latest chat or create new
-    # Simple logic: just grab latest json or make new
-    chat_files = list(chat_dir.glob("*.json"))
-    if chat_files:
-        latest_file = max(chat_files, key=lambda f: f.stat().st_mtime)
-        chat_id = latest_file.stem
-        history = ChatHistory(chat_id, chat_dir)
-        print(f"[Loaded chat {chat_id}]")
-        # Print last few messages
-        for msg in history.get_messages()[-10:]:
-             content = msg.get('content')
-             role = msg.get('role')
-             
-             if role == 'system':
-                 continue
-                 
-             if role == 'tool' and not args.debug:
-                 content = "[Tool Output Result - Hidden]"
-             elif role == 'assistant':
-                 if msg.get('tool_calls') and not args.debug:
-                     content = f"[Tool Call: {msg['tool_calls'][0]['function']['name']}]"
-                 elif not content:
-                      # If content is empty/None but no tool calls, it might be a malformed message or just a pure tool call step
-                      if msg.get('function_call'):
-                           content = f"[Function Call: {msg['function_call'].get('name')}]"
-                      else:
-                           content = "" 
-
-             if content:
-                print(f"{role}: {content}")
-    else:
-        import uuid
-        chat_id = str(uuid.uuid4())
-        history = ChatHistory(chat_id, chat_dir)
-        print(f"[Started new chat {chat_id}]")
-
-    # Initialize Tools
-    tools = [TavilySearchTool(), MemoryTool(memory_db)]
-
-    agent_node = PersistableAgent(args.model, tools, history, return_node=None, base_url=args.base_url, debug=args.debug)
-    user_input_node = UserInputNode(APP_CONFIG, history, memory_db, agent_node)
-    
-    # Wire the return node
-    agent_node.return_node = user_input_node
-    
-    runtime = Runtime(debug=args.debug)
-    # We start with User Input
-    runtime.start_session(user_input_node, {"messages": []})
-    runtime.run()
+    main()

@@ -272,9 +272,16 @@ backend does not change.
    The `A, B` mailbox hop is conversation to outbox. `deployment.py` and
    `config.py` were left alone; Second Brain imports them (see step 5).
    Tests: `tests/test_telegram_integration.py`.
-3. **Pipe** (subagent). State-backed exchange helper as a library module;
-   port `spawn_supervisor.py` and `waiting_session.py` onto `context.spawn`
-   plus `request`/`reply`. Closes NOW.md item 3 (two travel sessions).
+3. **Pipe** (subagent). *Done 2026-10-05.* `entourage/exchanges.py` keeps the
+   pending-exchange table in state: `request`, `call` (spawn plus request in
+   one checkpoint), `ingest` (replies matched on request ID and expected
+   sender, everything else returned as ordinary mail) and `drop` (forget a
+   dead child). `runner.notify_failures` is the runner's death notice,
+   callable on its own. `examples/spawn_supervisor.py` shows fork-join, an
+   `all` join that folds a failure notice, and impatience via `deadline`;
+   `examples/waiting_session.py` shows the three wake sources. Tests:
+   `tests/test_exchanges.py`. NOW.md item 3 (two travel sessions) is covered
+   by the parent-and-children test rather than a travel-themed demo.
 4. **Sweep.** `remote_tool_ingress.py` onto `session_ingress`;
    `retry_timeout.py` onto definition attempts plus handler policy, or dropped;
    monitors and actors retired as decided above.

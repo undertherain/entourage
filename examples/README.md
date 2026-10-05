@@ -9,22 +9,16 @@ The other [mailbox examples](mailboxes/README.md) retain the earlier teaching
 prototypes: a receive loop, saved-function continuation and explicit request/reply
 driver. Their helpers are example code, not the public executable API.
 
-The existing examples cover these other surfaces:
+The other examples all run on the same dispatcher and SQLite store:
 
 | Area | Examples |
 | --- | --- |
-| Interactive agents and transports | [cli.py](cli.py), [coding_agent.py](coding_agent.py), [mailbox_cli.py](mailbox_cli.py), [telegram_group_manager.py](telegram_group_manager.py) |
-| Graph waiting and coordination | [waiting_session.py](waiting_session.py), [remote_tool_ingress.py](remote_tool_ingress.py), [spawn_supervisor.py](spawn_supervisor.py) |
-| Graph execution policy | [retry_timeout.py](retry_timeout.py) |
+| Interactive agents | [cli.py](cli.py), [coding_agent.py](coding_agent.py): one model call per activation, tools inline, the conversation is session state |
+| Transports | [telegram_group_manager.py](telegram_group_manager.py): one session per chat, triage and answer as checkpointed phases, an outbox session for delivery |
+| Children and waiting | [spawn_supervisor.py](spawn_supervisor.py): fork-join, supervisor join with a death notice, impatience; [waiting_session.py](waiting_session.py): the three wake sources |
+| Shard runner | [shard/](shard/): agent folders launched and supervised by `python -m entourage.runner` |
+| Older graph runtime | [remote_tool_ingress.py](remote_tool_ingress.py), [retry_timeout.py](retry_timeout.py), [mailbox_cli.py](mailbox_cli.py): in-memory graph backends, kept until the sweep in [mailbox-first scheduling](../docs/mailbox-first-scheduling.md#migration) |
 
-The graph examples still use supported APIs. They run with in-memory backends and
-demonstrate waiting, spawn and retry semantics within one process. They do not
-demonstrate shard runners or automatic process launch. Run them from the repository
-root with `python -m examples.waiting_session` (substitute the example module).
-
-`cli.py` and `coding_agent.py` are older graph-based chat loops: they persist chat
-history while their execution graph stays in memory. Use `--model` to select a
-model available through your configured provider; `--help` requires no model call.
-`mailbox_cli.py` demonstrates process-local checkpoint ingestion. The Telegram
-demo adds persistent event history and optional Redis mailboxes, but has not been
-migrated to the atomic session checkpoint API. Neither is a shard-runner example.
+Run them from the repository root, for example `python examples/spawn_supervisor.py`.
+The chat examples take `--model` for your configured provider; `--help` makes no
+model call. The chat and Telegram examples need API keys; the others need nothing.

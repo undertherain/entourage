@@ -1,147 +1,151 @@
-"""
-Spawn on the commit — fork-join, a supervisor loop, and a lapsing monitor.
+"""Children as sessions: fork-join, a supervisor loop, and impatience.
 
-These are graph sessions executed in one process on in-memory backends. Child
-sessions here are not OS processes or the proposed shard runner's managed agents.
-
-``Transition(spawn=[Spawn(...)])`` creates a child session atomically with
-the parent node's completion: deterministic child identity (replay cannot
-twin it), lineage in the child's initial state, and the child contract
-fulfilled by the engine — a completing child publishes a correlated
-``kind: result`` event to its ``notify`` conversation, a failing child a
-``kind: system`` death notice. Both are ordinary mail: they feed armed
-monitors and wake parked parents.
+Everything here runs on the session dispatcher in one process over a
+temporary SQLite store. A child is a session spawned in the parent's
+checkpoint; its reply is mail to the parent; the parent keeps the pending
+exchanges in state (`entourage.exchanges`) and stays interruptible while it
+waits. Nothing is a graph, and no process is launched.
 
 Three acts:
 
-  1. fork-join  — spawn + park on ``corr:{correlation_id}``; the child's
-     result resumes the parent like a tool return;
-  2. supervisor — two children report into one inbox; the supervisor loop
-     re-parks after every drain until all children are accounted for,
-     incorporating one success and one death notice;
-  3. monitor    — a dispatch to a remote that never answers, with a
-     deadline monitor armed on the same commit; the lapse arrives as
-     ``kind: system`` mail and wakes the supervisor.
+  1. fork-join  — spawn a child and request it in one commit, park, join on
+     its reply like a tool return;
+  2. supervisor — two children report into the parent; one dies, and the
+     failure notice (the runner's, here invoked directly) is ordinary mail
+     the loop incorporates before deciding whether to keep waiting;
+  3. impatience — a request to a session nobody serves, with a deadline on
+     the wait; the timer wakes the parent, which escalates.
 
 Run:  python examples/spawn_supervisor.py
 """
 
-import logging
+import tempfile
 import time
+from pathlib import Path
 
-from entourage.flow import Sequence, WaitForMailbox
-from entourage.ingress import correlation_conversation
-from entourage.monitors import Monitor
-from entourage.runtime import Runtime
-from entourage.transition import Spawn, Transition
+from entourage.exchanges import Exchanges
+from entourage.executables import Dispatcher, Executable
+from entourage.runner import notify_failures
+from entourage.sessions import LocalSessions
 
-logging.basicConfig(level=logging.CRITICAL, format="%(levelname)s %(message)s")
+
+def incorporated(mail):
+    return [event["event_id"] for event in mail]
 
 
 # ── Act 1: fork-join ─────────────────────────────────────────
 
-print("Act 1 — fork-join: spawn a child, park on its correlation, join:")
+def fork(context, state, mail):
+    exchanges = Exchanges(state)
+    replies, _ = exchanges.ingest(mail)
+    if state.get("phase", "start") == "start":
+        child = exchanges.call(context, "resize:v1", {}, {"image": "cat.png"}, key="job-1")
+        print(f"    fork: spawned {child}, parking until it replies")
+        state["phase"] = "joining"
+        return context.propose(state, incorporated=incorporated(mail))
+    for reply in replies:
+        print(f"    join: child reported {reply.payload['thumbnail']!r}; continuing the turn")
+    return context.propose(state, incorporated=incorporated(mail), complete=not exchanges)
 
-def fork(state):
-    print("    fork: spawning resize-worker, parking until it reports")
-    return Transition(
-        state=state,
-        spawn=[Spawn(plan=resize, initial_state={"image": "cat.png"},
-                     correlation_id="job-1")],
-        plan=Sequence(
-            WaitForMailbox(conversation=correlation_conversation("job-1")),
-            join,
-        ),
-    )
 
-def resize(state):
-    print(f"    child: resizing {state['image']} "
-          f"(lineage: parent exec {state['spawn']['parent_exec_id'][:8]}…)")
-    return {**state, "thumbnail": "cat_64px.png"}
-
-def join(state):
-    (event,) = state["events"]
-    print(f"    join: child reported {event['payload']['thumbnail']!r} "
-          f"— continuing the original turn")
-    return state
-
-rt = Runtime()
-rt.start_session(Sequence(fork))
-rt.run()
+def resize(context, state, mail):
+    for request in mail:
+        print(f"    child: resizing {request['payload']['image']} for {request['reply_to']}")
+        context.reply(request, {"thumbnail": "cat_64px.png"})
+    return context.propose(state, incorporated=incorporated(mail), complete=True)
 
 
 # ── Act 2: the supervisor loop ───────────────────────────────
 
-print("\nAct 2 — supervision: two children, one dies; the loop re-decides:")
+def supervise(context, state, mail):
+    exchanges = Exchanges(state)
+    if state.get("phase", "start") == "start":
+        for slot, definition in (("ok", "ok-worker:v1"), ("doomed", "doomed-worker:v1")):
+            exchanges.call(context, definition, {}, {"slot": slot}, key=slot)
+        print("    supervisor: spawned ok and doomed workers, parking")
+        state["phase"] = "waiting"
+        return context.propose(state, incorporated=incorporated(mail))
+    replies, others = exchanges.ingest(mail)
+    for reply in replies:
+        print(f"    supervisor: {reply.label!r} finished fine (work={reply.payload['work']!r})")
+    for event in others:
+        failed = event.get("payload", {}).get("failed")
+        if event["kind"] == "system" and failed:
+            labels = exchanges.drop(failed)
+            print(f"    supervisor: death notice for {labels!r} after "
+                  f"{event['payload']['attempts']} attempt(s); could respawn, logging instead")
+    if exchanges:
+        print(f"    supervisor: {len(exchanges)} child(ren) outstanding, parking again")
+        return context.propose(state, incorporated=incorporated(mail))
+    print("    supervisor: all children accounted for, loop ends")
+    return context.propose(state, incorporated=incorporated(mail), complete=True)
 
-def dispatch_fleet(state):
-    print("    supervisor: spawning ok-worker and doomed-worker → inbox")
-    return Transition(
-        state={**state, "outstanding": 2},
-        spawn=[
-            Spawn(plan=ok_worker, slot="ok", notify="sup:inbox"),
-            Spawn(plan=doomed_worker, slot="doomed", notify="sup:inbox"),
-        ],
-        plan=supervise_plan(),
-    )
 
-def supervise_plan():
-    return Sequence(WaitForMailbox(conversation="sup:inbox", timeout=5), supervise)
+def ok_worker(context, state, mail):
+    for request in mail:
+        context.reply(request, {"work": "done"})
+    return context.propose(state, incorporated=incorporated(mail), complete=True)
 
-def ok_worker(state):
-    return {**state, "work": "done"}
 
-def doomed_worker(state):
+def doomed_worker(context, state, mail):
     raise RuntimeError("segfault in the C extension")
 
-def supervise(state):
-    outstanding = state["outstanding"]
-    for event in state["events"]:
-        payload = event.get("payload", {})
-        # A result's payload is the child's final state; lineage rides it.
-        slot = payload.get("slot") or payload.get("spawn", {}).get("slot", "?")
-        if event["kind"] == "result":
-            print(f"    supervisor: slot {slot!r} finished fine "
-                  f"(work={payload['work']!r})")
-            outstanding -= 1
-        elif event["kind"] == "system" and event.get("payload", {}).get("reason") == "failed":
-            print(f"    supervisor: death notice from slot {slot!r}: "
-                  f"{event['payload']['error']!r} — could re-spawn, logging instead")
-            outstanding -= 1
-    new_state = {**state, "outstanding": outstanding}
-    if outstanding > 0:
-        print(f"    supervisor: {outstanding} child(ren) outstanding — parking again")
-        return new_state, supervise_plan()   # the loop: wait → decide → wait
-    print("    supervisor: all children accounted for — loop ends")
-    return new_state
 
-rt = Runtime()
-rt.start_session(Sequence(dispatch_fleet))
-rt.run()
+# ── Act 3: impatience ────────────────────────────────────────
+
+def dispatch_into_the_void(context, state, mail):
+    exchanges = Exchanges(state)
+    if state.get("phase", "start") == "start":
+        exchanges.request(context, "the-void", {"job": 9}, key="job-9")
+        print("    dispatch: requested a session nobody serves; waiting at most 0.3s")
+        state["phase"] = "waiting"
+        return context.propose(state, incorporated=incorporated(mail), deadline=time.time() + 0.3)
+    replies, others = exchanges.ingest(mail)
+    for event in others:
+        if event["kind"] == "system" and event.get("source") == "timer":
+            print(f"    dispatch: timer woke us with {list(exchanges.pending.values())[0]['label']!r} "
+                  "still pending; time to escalate or retry")
+    return context.propose(state, incorporated=incorporated(mail), complete=True)
 
 
-# ── Act 3: the monitor covers silence ────────────────────────
+def run(dispatcher):
+    for result in dispatcher.run_until_idle():
+        if not result.committed:
+            print(f"    [{result.session_id} failed: {result.error}]")
 
-print("\nAct 3 — a remote that never answers; the armed monitor lapses:")
 
-def dispatch_into_the_void(state):
-    print("    dispatch: simulating an unanswered request, arming a 0.5s "
-          "deadline monitor on the same commit")
-    return Transition(
-        state=state,
-        arm=[Monitor(notify="sup:inbox", correlation_id="job-9",
-                     deadline=time.time() + 0.5)],
-        plan=Sequence(WaitForMailbox(conversation="sup:inbox", timeout=5), on_lapse),
-    )
+def main():
+    with tempfile.TemporaryDirectory() as folder:
+        store = LocalSessions(Path(folder) / "sessions.db")
+        # A short lease keeps the doomed worker's retry backoff short as well.
+        dispatcher = (Dispatcher(store, max_attempts=1, lease_seconds=0.5)
+                      .register(Executable("fork:v1", fork))
+                      .register(Executable("resize:v1", resize))
+                      .register(Executable("supervisor:v1", supervise))
+                      .register(Executable("ok-worker:v1", ok_worker))
+                      .register(Executable("doomed-worker:v1", doomed_worker))
+                      .register(Executable("void-caller:v1", dispatch_into_the_void)))
+        store.bind_definition("void:v1", {})  # a definition no dispatcher serves
 
-def on_lapse(state):
-    (event,) = state["events"]
-    payload = event["payload"]
-    print(f"    supervisor: monitor {payload['monitor_id']!r} lapsed "
-          f"({payload['reason']}, correlation {payload['correlation_id']!r}) "
-          f"— nobody answered; time to escalate or retry")
-    return state
+        print("Act 1 — fork-join: spawn a child, park on its reply, join:")
+        dispatcher.create("fork", "fork:v1", {})
+        run(dispatcher)
 
-rt = Runtime()
-rt.start_session(Sequence(dispatch_into_the_void))
-rt.run()
+        print("\nAct 2 — supervision: two children, one dies; the loop re-decides:")
+        dispatcher.create("supervisor", "supervisor:v1", {})
+        run(dispatcher)
+        time.sleep(0.6)  # the doomed worker's backoff passes; its next claim parks it failed
+        run(dispatcher)
+        notify_failures(store, "supervisor")  # what the shard runner does on its tick
+        run(dispatcher)
+
+        print("\nAct 3 — a request nobody answers; the deadline wakes the waiter:")
+        store.create("the-void", "void:v1", {})
+        dispatcher.create("caller", "void-caller:v1", {})
+        run(dispatcher)
+        time.sleep(0.35)
+        run(dispatcher)
+
+
+if __name__ == "__main__":
+    main()

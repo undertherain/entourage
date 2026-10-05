@@ -174,8 +174,9 @@ Context exposes `session_id`, `definition`, per-attempt `activation_id`, `config
 Keys identify logical operations and must be stable across retries and unique
 within the sending session. Reusing a key for different work can deduplicate away
 the new publication. Store outstanding request IDs in state; match both correlation
-and the expected sender before accepting results. The helpers do not implement
-an authorization system or runtime-managed exchange registry. Replies have
+and the expected sender before accepting results. `entourage.exchanges.Exchanges`
+does exactly that over one state key (`request`, `call`, `ingest`, `drop`); the
+runtime itself keeps no exchange registry and implements no authorization. Replies have
 `kind: result`, `request_id`, `source` and `payload`; requests additionally carry
 `reply_to`. Destinations must already exist, including output adapter mailboxes,
 unless spawned by the same proposal: children are created before publications

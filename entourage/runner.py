@@ -251,6 +251,28 @@ def make_launcher(shard: Shard, **options) -> Launcher:
     raise ValueError(f"unknown launcher kind {kind!r}")
 
 
+def notify_failures(store: SessionBackend, notify: str) -> int:
+    """Report each failed session once, as `kind: system` mail to `notify`.
+
+    The event ID carries revision and attempts, so a session that is retried
+    and fails again is reported again while a repeated tick is idempotent.
+    Returns the number of new notices.
+    """
+    count = 0
+    for row in store.list_sessions(status="failed"):
+        event_id = f"runner:failed:{row['session_id']}:{row['revision']}:{row['attempts']}"
+        try:
+            if store.append(notify, {
+                    "event_id": event_id, "kind": "system", "source": "runner",
+                    "payload": {"failed": row["session_id"], "executable": row["executable"],
+                                "attempts": row["attempts"]}}):
+                count += 1
+                log.error("session %s failed after %d attempts", row["session_id"], row["attempts"])
+        except (KeyError, ValueError) as error:
+            log.error("cannot notify %s: %s", notify, error)
+    return count
+
+
 class Runner:
     """One tick: reap, kill stuck holders, notify failures, then start what policy wants."""
 
@@ -309,16 +331,7 @@ class Runner:
                 self.launcher.kill(holder)
                 del running[holder]
         if self.shard.notify:
-            for row in self.store.list_sessions(status="failed"):
-                event_id = f"runner:failed:{row['session_id']}:{row['revision']}:{row['attempts']}"
-                try:
-                    if self.store.append(self.shard.notify, {
-                            "event_id": event_id, "kind": "system", "source": "runner",
-                            "payload": {"failed": row["session_id"], "executable": row["executable"],
-                                        "attempts": row["attempts"]}}):
-                        log.error("session %s failed after %d attempts", row["session_id"], row["attempts"])
-                except (KeyError, ValueError) as error:
-                    log.error("cannot notify %s: %s", self.shard.notify, error)
+            notify_failures(self.store, self.shard.notify)
         busy = {row["worker"] for row in active if row["worker"] in running}
         counts = {alias: 0 for alias in self.shard.members}
         idle = {alias: 0 for alias in self.shard.members}

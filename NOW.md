@@ -12,10 +12,11 @@ and publication history; its July “current direction” is not the current bui
 is retired in five steps, each a commit with its own proof. No backend changes:
 exchanges and strict joins are handler-side state, one activation per node by
 default, the plan helper is deferred until a consumer needs runtime splicing.
-Progress: steps 1 and 2 done (`entourage/turn.py`, `examples/cli.py`,
-`examples/coding_agent.py`, `examples/telegram_group_manager.py` on the
-dispatcher with ingress keying and an outbox session); step 3 (pipe) next.
-Second Brain still imports the graph runtime, so step 5 keeps import paths. The earlier
+Progress: steps 1 to 3 done (`entourage/turn.py`, `entourage/exchanges.py`,
+`runner.notify_failures`; `cli.py`, `coding_agent.py`,
+`telegram_group_manager.py`, `spawn_supervisor.py`, `waiting_session.py` on
+the dispatcher); step 4 (sweep) next. Second Brain still imports the graph
+runtime, so step 5 keeps import paths. The earlier
 direction below stays as history; its item 2 is superseded.
 
 Entourage owns a graph-independent execution core shared by graph workflows and
@@ -137,10 +138,10 @@ Second Brain shard itself.
 2. Done as worker processes sharing the store (no step protocol). *Superseded
    2026-10-05:* graph nodes are not reused; the graph runtime is retired
    ([migration](docs/mailbox-first-scheduling.md#migration)).
-3. Atomic child creation is done (`Context.spawn`, derived names). Remaining:
-   durable exchange/reply handles and the demonstration of two travel sessions
-   sharing code: delegate tour, ask user, persist and exit, answer, resume child,
-   return mock confirmation.
+3. Done 2026-10-05: `Context.spawn` plus `entourage.exchanges` (pending
+   exchanges in state, replies matched on ID and sender, failure notices
+   folded into joins); `tests/test_exchanges.py` covers parent and children
+   across activations with steering while waiting.
 4. Reserved and pooled capacity exist per shard. Remaining: priorities and
    cross-member fairness beyond claim rotation.
 5. Add Astral through a transactional outbox and replay-safe operation identities.

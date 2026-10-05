@@ -1,91 +1,68 @@
-"""
-WaitForMailbox — graph waiting and wakeup on mail or timer.
+"""Three ways a parked session wakes: mail already there, mail later, a timer.
 
-This script uses the in-memory Runtime backend and a background thread. It
-demonstrates wait semantics within one process, not persistence across restarts.
-For a file-backed restart walkthrough see examples/mailboxes/registered/README.md.
-
-``WaitForMailbox`` is a plan leaf: wherever a node could go, a wait can
-go. The execution parks in the graph store (status ``waiting``, holding no
-worker) and wakes when its conversation has claimable events or its
-timeout fires. Drained events land in the successor's state under
-``"events"`` and are acknowledged inside the same transition commit that
-completes the wait; a timeout delivers a single ``kind: system`` timer
-event instead, so the successor re-decides rather than hanging forever.
-
-Three acts:
-
-  1. mail is already there  → the wait drains it without parking;
-  2. mail arrives later     → the session parks, then wakes on the append;
-  3. nothing ever arrives   → the timer event wakes it past the timeout.
+A session on the dispatcher parks with every proposal that is not complete.
+It is ready again when its inbox has unincorporated mail or its deadline has
+passed, and both facts are durable, so this holds across restarts as well as
+within one process. Compare the registered example for the fresh-process
+walkthrough.
 
 Run:  python examples/waiting_session.py
 """
 
-import logging
+import tempfile
 import threading
 import time
+from pathlib import Path
 
-from entourage.flow import Sequence, WaitForMailbox
-from entourage.runtime import Runtime
-
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+from entourage.executables import Dispatcher, Executable
+from entourage.sessions import LocalSessions
 
 
-def triage(state):
-    for event in state["events"]:
+def triage(context, state, mail):
+    for event in mail:
         if event["kind"] == "system" and event.get("source") == "timer":
-            print(f"    triage: no mail after {event['payload']['timeout']}s — timer woke us")
+            print("    triage: nothing arrived, the timer woke us")
         else:
-            print(f"    triage: got {event['kind']} event: {event['content']!r}")
-    return state
+            print(f"    triage: got {event['kind']} event: {event['payload']['text']!r}")
+    state["wakes"] = state.get("wakes", 0) + 1
+    deadline = None if mail else time.time() + 0.3  # wait at most 0.3s for the first mail
+    return context.propose(state, incorporated=[e["event_id"] for e in mail],
+                           deadline=deadline, complete=bool(mail))
 
 
-def plan():
-    return Sequence(WaitForMailbox(conversation="support:alice", timeout=3), triage)
+def user(text):
+    return {"event_id": f"user:{text}", "kind": "user", "payload": {"text": text}}
 
 
-def show_status(rt, session_id, note):
-    session = rt.store.get_session(session_id)
-    waiting = rt.store.get_session_executions(session_id, status="waiting")
-    print(f"    [{note}] session={session['status']}"
-          f" parked={[ex['node_name'] for ex in waiting] or 'no'}")
+def main():
+    with tempfile.TemporaryDirectory() as folder:
+        store = LocalSessions(Path(folder) / "sessions.db")
+        dispatcher = Dispatcher(store).register(Executable("triage:v1", triage))
+
+        print("Act 1 — the mail is already there; the first activation sees it:")
+        dispatcher.create("alice", "triage:v1", {})
+        store.append("alice", user("my printer is on fire"))
+        dispatcher.run_until_idle()
+        print(f"    [alice is {store.inspect('alice')['status']}]")
+
+        print("\nAct 2 — nothing to read yet: park, then mail wakes the session:")
+        dispatcher.create("bob", "triage:v1", {})
+        dispatcher.run_until_idle()  # first activation: empty batch, parks with a deadline
+        print(f"    [bob is {store.inspect('bob')['status']}, holding no worker]")
+        threading.Timer(0.1, lambda: store.append("bob", user("nevermind, fixed it"))).start()
+        stop = threading.Event()
+        threading.Timer(0.25, stop.set).start()
+        dispatcher.run_forever(stop, poll_interval=0.02)
+        print(f"    [bob is {store.inspect('bob')['status']}]")
+
+        print("\nAct 3 — silence: the deadline delivers a kind:system timer event:")
+        dispatcher.create("carol", "triage:v1", {})
+        dispatcher.run_until_idle()
+        time.sleep(0.35)
+        dispatcher.run_until_idle()
+        print(f"    [carol is {store.inspect('carol')['status']} after "
+              f"{store.inspect('carol')['state']['wakes']} wakes]")
 
 
-# ── Act 1: mail waiting before the session starts ────────────
-
-print("Act 1 — the event is already in the mailbox, the wait never parks:")
-rt = Runtime()
-rt.mailbox.append("support:alice", {"kind": "user", "content": "my printer is on fire"})
-sid = rt.start_session(plan())
-rt.run()
-show_status(rt, sid, "after run")
-
-# ── Act 2: park now, mail arrives later ──────────────────────
-
-print("\nAct 2 — nothing to drain yet: the session parks, then mail wakes it:")
-rt = Runtime()
-sid = rt.start_session(plan())
-rt.run_once(poll_wait=0.01)          # executes the wait → parks
-show_status(rt, sid, "parked")
-
-def late_interjection():
-    time.sleep(0.3)
-    print("    (0.3s later, a background thread appends to the mailbox...)")
-    rt.mailbox.append("support:alice", {"kind": "user", "content": "nevermind, fixed it"})
-
-threading.Thread(target=late_interjection).start()
-rt.run()                              # the wake tick picks the append up
-show_status(rt, sid, "after run")
-
-# ── Act 3: nobody writes — the timer is the fourth wake source ─
-
-print("\nAct 3 — silence: the timeout delivers a kind:system timer event:")
-rt = Runtime()
-sid = rt.start_session(
-    Sequence(WaitForMailbox(conversation="support:alice", timeout=0.5), triage)
-)
-rt.run_once(poll_wait=0.01)
-show_status(rt, sid, "parked")
-rt.run()                              # the loop sleeps until wake_at, then fires
-show_status(rt, sid, "after run")
+if __name__ == "__main__":
+    main()

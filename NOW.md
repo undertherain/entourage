@@ -44,11 +44,14 @@ binding for distributed delivery. Distributed delivery alone does not supply sta
 failover. Second Brain retains application tasks, conversation and knowledge policy.
 
 **2026-10-10: work protocol drafted, not decided.** A durable handle as the
-primitive between callers and providers, with pull, reactive and proactive
-delivery as attachments; a session is most of that handle already. Gaps (work
-status vs scheduling status, cancel, owner, revision-checked steering, reactive)
-are in [work protocol](docs/work-protocol.md). Its first application, Library
-proposals, is Second Brain's.
+primitive between callers and providers; a session is most of that handle
+already. Brainstormed the same day: a wire sketch (provider decides within the
+caller's wait budget), pipes opened at runtime with capabilities checked like
+types, a panel per agent (grown from `entourage.exchanges`), and case A (an LLM
+loop calling subagents) worked through against `ChatAgent`. Next: prototype one
+`ChatAgent` delegating to another through a pipe. All in
+[work protocol](docs/work-protocol.md), with a discussion log. Its first
+application, Library proposals, is Second Brain's.
 
 ## Verified baseline
 

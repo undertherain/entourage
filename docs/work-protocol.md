@@ -392,6 +392,19 @@ separately.
    limit for one turn (30 s by default, never extended). A tool that runs longer
    kills the turn. That is why long tools need a pipe at all.
 
+## Next (where to pick up)
+
+Two candidates, neither started:
+
+1. **Prototype build items 1 to 3:** one `ChatAgent` delegating to another
+   through a pipe, with the panel-mailbox pairing, wait, connect and promotion, and
+   a test. Shows whether case A holds before offers and opening checks exist.
+   Recommended first.
+2. **Case B, external callers** (Claude Code, Codex over MCP). They have no mailbox,
+   so only block or pull apply, with "a timeout becomes a handle" from the wire
+   sketch, and `work_read` / `work_send` as the generic tools where a client lacks
+   MCP Tasks. Not yet discussed beyond that.
+
 ## Open
 
 - Shared status vocabulary: adopt MCP's (working, input_required, completed,
@@ -441,6 +454,11 @@ above.
   mesh and delegates, so the check moves from registration to opening the pipe;
   capabilities wanted as required or optional; fixed pipes are pipes opened at
   start. Discovery is outside the protocol. Gaps rewritten in plain words.
+- **2026-10-10**: clarified: the gaps are a build list, not obstacles. The strict
+  "unknown mail is an error" rule stays; the panel-mailbox pairing reads mail
+  first and takes the pipe's kinds. `ChatAgent` is Entourage's reference loop, not
+  Concierge (which has its own `resume` and adopts the panel separately). Next
+  steps recorded under *Next*.
 
 Settled elsewhere, do not re-derive: wake-condition knobs and the resume helper
 (CbR as a library over state), each session as one stack frame with `reply_to` as

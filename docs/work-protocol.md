@@ -404,9 +404,42 @@ separately.
    limit for one turn (30 s by default, never extended). A tool that runs longer
    kills the turn. That is why long tools need a pipe at all.
 
+## The loop underneath (2026-10-10, evening)
+
+Before the pipe, the user asked for the bare case: "read the user's message,
+call the model, run tools if it asks, repeat until it answers, then wait for the
+next message", written without `ChatAgent` or the panel, to see what
+durability adds. `examples/tool_loop.py` is that loop, with
+`tests/test_tool_loop.py`. Findings:
+
+- The three places to continue from are three methods: `call_model` when a
+  user message or a tool result is in, `call_tools` then exit, `ask_user` then
+  exit. `resume` reads the mail and picks the place. That is the "little bit of
+  graph" the user missed from Entourage 1, as a phase table inside the handler.
+- Durability adds one thing: the **slot**. A tool may return `Pending`
+  ("run this elsewhere": a definition and a payload) instead of a result; the
+  loop spawns it, keeps the tool call open and parks. The result comes back as
+  mail and fills the slot. `Lifted(tool)` turns any plain tool into one that
+  returns `Pending`, and `ToolRunner` is the session that runs it under its own
+  lease. That is build item 5 in its minimal form, and the degenerate pipe.
+- The second thing it adds is forced by the chat format: a user message that
+  arrives while a slot is open is **held** in state and appended after the
+  result. This is the strict wait of `ChatAgent`; the mailbox is only the
+  delivery, nothing of it shows in the loop.
+- Exit after calling tools is a `propose` with `deadline=NOW` when every result
+  is in, so the next activation continues at once with a checkpoint between.
+  That checkpoint is the window in which a user message lands between a tool
+  result and the next model call.
+
+Direction from this (user): start from this loop, not from the pipe. `Pending`
+as a tool return should become the primitive under `Pipe`, so `ChatAgent` stops
+knowing which tools are pipes; the panel is then the registry of open slots
+with modes and controls on top.
+
 ## Next (where to pick up)
 
-Case A holds in tests; not yet run against a real model. Candidates:
+Case A holds in tests; not yet run against a real model. The bare loop is in
+`examples/tool_loop.py`. Candidates:
 
 1. **Run it for real:** an example with two `ChatAgent`s over litellm, to see
    whether the status lines ("started as work …", "work … asks: …") steer a model

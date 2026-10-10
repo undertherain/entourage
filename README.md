@@ -159,6 +159,9 @@ resumption in a fresh process.
 - **Cost model.** A parked session holds no memory. Every hop between sessions is a
   checkpoint and a claim; steps inside a session do not touch a queue. Keep session
   state small and reference bulky data.
+- **Draft: work protocol.** A session as the durable handle a caller attaches to by
+  pull, live stream or mailbox; what is missing for that.
+  [Work protocol](docs/work-protocol.md).
 
 ## Capabilities
 

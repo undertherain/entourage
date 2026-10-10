@@ -43,6 +43,13 @@ Simple local file-backed communication supports debugging; Astral is a future
 binding for distributed delivery. Distributed delivery alone does not supply state
 failover. Second Brain retains application tasks, conversation and knowledge policy.
 
+**2026-10-10: work protocol drafted, not decided.** A durable handle as the
+primitive between callers and providers, with pull, reactive and proactive
+delivery as attachments; a session is most of that handle already. Gaps (work
+status vs scheduling status, cancel, owner, revision-checked steering, reactive)
+are in [work protocol](docs/work-protocol.md). Its first application, Library
+proposals, is Second Brain's.
+
 ## Verified baseline
 
 Reviewed commit **e325d84309a839d125b65a1896285da1bb907f4c** on 2026-09-09.

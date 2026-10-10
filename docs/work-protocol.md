@@ -248,6 +248,121 @@ For the LLM loop calling tools (case A), as stated:
 **Deferred.** Ask across a chain (Concierge → agent A → tool B, B asks something
 A cannot answer): leave it to the LLM and B until a real case needs a rule.
 
+## Case A worked through: `ChatAgent` with pipes (proposed 2026-10-10)
+
+Checked against `entourage/turn.py`, `entourage/exchanges.py` and `Context` in
+`entourage/executables.py` as of `4e83479`. Nothing here is built.
+
+### Declarations
+
+**Provider: an offer, persisted in the definition contract.** A session-backed
+provider declares it at registration; it goes into the JSON contract that
+`bind_definition` already persists, so a caller in another worker can check it
+from the store without loading the code.
+
+```python
+Executable("research:v1", resume, offers=Offer(steer=True, cancel=True, ask=True))
+# contract: {..., "offers": {"pend": "always", "steer": true, "cancel": true,
+#                            "ask": true, "progress": false}}
+```
+
+A session provider is always `pend: always` (it replies in a later activation).
+An inline tool (`schema` + `execute`) is `pend: never` with nothing else: L0.
+
+**Caller: a pipe, declared where the agent is built.**
+
+```python
+ChatAgent(complete, tools=[clock, search],
+          pipes=[Pipe("research:v1", label="research",
+                      modes=("wait", "connect"), default="wait", per_call=True,
+                      steer=True, cancel=True, ask="answer")])
+```
+
+**Checked when the executable is registered** (the in-shard equivalent of pipe
+creation), against the target's offer:
+
+- a capability the caller asks for and the offer lacks: error;
+- `connect` (or a wait budget) towards an inline tool: error, unless the pipe says
+  `lift=True`, which runs the tool in a generic tool-runner child session (cancel
+  then works as a fence; steer never does);
+- `ask: true` on the offer and no Ask handler on the pipe: error; `refuse` is an
+  explicit handler.
+
+### Mail kinds on a pipe
+
+A to B: `request` (with `reply_to`, exists today), `steer`, `cancel`, `answer`.
+B to A, each carrying `request_id`: `progress`, `ask`, and `result` with a final
+status `completed | failed | cancelled`. Only `request` and `result` exist now.
+
+### What the model sees
+
+- Each pipe is one tool. With `per_call` and both modes, the schema gets a
+  `background: bool` argument (the pipe's default applies when omitted).
+- Panel tools appear only for capabilities some pipe actually offers:
+  `steer(work, text)`, `cancel(work)`, `answer(work, text)`. A capability the
+  pipe lacks is never shown, so the model cannot make the type error.
+
+### The panel entry
+
+`Exchanges` grows into the panel: the same table in state, keyed by `request_id`,
+with what the protocol needs.
+
+```json
+"panel": {"<request_id>": {"to": "<child session>", "label": "research",
+                           "tool_call_id": "call_1", "mode": "wait",
+                           "status": "working", "question": null,
+                           "offers": ["steer", "cancel", "answer"]}}
+```
+
+### One activation, step by step
+
+1. Ingest: `panel.ingest(mail)` first. `result` for a `wait` entry becomes the
+   deferred `role: tool` message for its `tool_call_id`; `result` for a
+   `connected` entry becomes a message to the model ("[research finished] …");
+   `ask` sets `input_required` and the question; everything else is ordinary mail,
+   as today.
+2. A tool call on a pipe: `Exchanges.call` (spawn plus request, one checkpoint)
+   and a panel entry.
+   - **connect**: append the tool result at once, a status line ("started as work
+     X; the result arrives as a message"). The loop goes on.
+   - **wait**: append nothing yet. The model cannot be called while a tool call
+     has no result (the chat-completions message rule), so the session parks
+     until every waited reply is in, or the wait budget's deadline passes.
+3. Panel tools: `steer` and `answer` send to the child; `cancel` sends `cancel`,
+   marks the entry `cancelled` at once and `Exchanges.drop`s it, so a late result
+   is ordinary mail (MCP's rule: cancelled stays cancelled).
+
+### Finding: wait is connect with the tool result deferred
+
+The two modes differ only in *when the tool result is written*. **Promotion**
+writes it early, as a status line, and turns the entry from `wait` into
+`connected`. Three things promote:
+
+- the wait budget passes (the wire sketch's "a timeout becomes a handle");
+- the work asks a question: the question *is* the early tool result ("work X
+  needs: which account? reply with `answer`"), since the model needs a turn to
+  answer;
+- the user writes while the agent waits, if the pipe is interruptible; otherwise
+  the message is buffered in state until the waits resolve (the strict join of
+  [mailbox-first scheduling](mailbox-first-scheduling.md)).
+
+So promotion is one mechanism serving timeout, Ask and interruption, and the model
+never sees a dangling tool call.
+
+### Gaps in the current code
+
+1. `ChatAgent.resume` raises on any mail kind but user, message and timer, so it
+   cannot receive replies. Panel ingest has to run first.
+2. `Exchanges.ingest` matches only `kind: result` and deletes the entry. The panel
+   needs non-terminal kinds (`ask`, `progress`) that keep the entry, plus status.
+3. `ChatAgent` cannot be a provider: it does not accept `request` mail, sends its
+   answer to `output` instead of `context.reply`, and has no `steer` kind.
+4. `Executable` has no offers, and the contract does not carry them.
+5. There is no tool-runner definition to lift an inline tool.
+6. The lease is the hard step limit (no renewal), so a blocking inline tool longer
+   than the lease fails the step. Today that is the only block mode, and the main
+   reason long tools need a pipe.
+
 ## Open
 
 - Shared status vocabulary: adopt MCP's (working, input_required, completed,
@@ -288,6 +403,11 @@ above.
   out). Selector: proposed per call within the pipe's allowed set.
 - **2026-10-10**: agreed: A's logic picks wait or connect per call; allowing that
   is a pipe option.
+- **2026-10-10**: case A worked through against `ChatAgent` and `Exchanges`:
+  offers in the persisted definition contract, pipes checked at registration,
+  panel as grown `Exchanges`, panel tools shown only for offered capabilities.
+  Finding: wait is connect with the tool result deferred; promotion (timeout, ask,
+  interruption) writes it early. Six code gaps listed.
 
 Settled elsewhere, do not re-derive: wake-condition knobs and the resume helper
 (CbR as a library over state), each session as one stack frame with `reply_to` as

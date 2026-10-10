@@ -407,8 +407,12 @@ Two candidates, neither started:
 
 ## Open
 
-- Shared status vocabulary: adopt MCP's (working, input_required, completed,
-  failed, cancelled) or A2A's richer set? Lean MCP, plus `expired`.
+- Shared status vocabulary: decided 2026-10-10 to include MCP's (working,
+  input_required, completed, failed, cancelled) and add our own as needed
+  (`expired`, and whatever the prototype shows). Open: the exact list.
+- Forced cancel: how the runtime marks a session cancelled so it never wakes
+  again, and kills a running activation (gap 2). Needed for the "dumb subagent"
+  case below.
 - Where the interface lives as code: here (it is coordination, and Second Brain
   depends on Entourage), or in Second Brain's core next to the dataplane, whose
   records (intake, proposal, `modules/work` tasks) are handles without being
@@ -459,6 +463,19 @@ above.
   first and takes the pipe's kinds. `ChatAgent` is Entourage's reference loop, not
   Concierge (which has its own `resume` and adopts the panel separately). Next
   steps recorded under *Next*.
+
+- **2026-10-10** (user, evening): the vocabulary includes MCP's statuses but is
+  not limited to them. **Cancel is best effort, escalating**: the caller-side
+  fence (status flips, late results are ordinary mail) stays; on the provider
+  side, cancel mail first, a grace period for a cooperative subagent, then
+  forced shutdown for one that does not read its mailbox (a lifted tool, a stuck
+  loop). Forced shutdown is a runtime feature (gap 2), now a build item.
+  **The pipe should survive both endpoints**: today it is a panel entry in the
+  caller plus `reply_to` on the request, durable on both sides but gone with
+  either session; the target is the handle readable from any session after the
+  caller is gone (the pull row). Clarified in conversation: "wire sketch" means
+  the section of that name; "Ask" is the provider's `input_required`; "item 3"
+  is `ChatAgent` as subagent. All of it to be adjusted as we prototype.
 
 Settled elsewhere, do not re-derive: wake-condition knobs and the resume helper
 (CbR as a library over state), each session as one stack frame with `reply_to` as

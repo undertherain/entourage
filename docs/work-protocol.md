@@ -360,15 +360,23 @@ writes it early, as a status line, and turns the entry from `wait` into
 So promotion is one mechanism serving timeout, Ask and interruption, and the model
 never sees a dangling tool call.
 
-### What the current code cannot do yet
+### What it takes to build
+
+A build list, not obstacles: where the concept lands in today's code. `ChatAgent`
+is Entourage's reference agent loop (`entourage/turn.py`, used by
+`examples/cli.py` and `coding_agent.py`); Second Brain's Concierge has its own
+`resume` and only borrows `litellm_complete`, so it would adopt the panel
+separately.
 
 1. **`ChatAgent` cannot receive a reply.** When it wakes, it goes through its new
    mail and accepts only user messages and timer ticks. Anything else makes it
    stop with an error, on purpose, so unknown mail is never silently dropped
    (`turn.py`, the `raise ValueError("unexpected mail …")` line). A subagent's
    answer arrives as mail of kind `result`, so today it would crash the agent's
-   turn; after three tries the session is marked failed. The panel has to look at
-   the mail first and take out what belongs to it.
+   turn; after three tries the session is marked failed. The strict rule stays;
+   this is the panel-mailbox pairing: the panel reads the mail first and takes
+   the pipe's kinds (`result`, `ask`, `progress`), and the rest reaches the agent
+   as before.
 2. **`Exchanges` only understands final answers.** It recognises mail of kind
    `result` and then forgets the request. A question or a progress note from the
    subagent would not be recognised as belonging to that request.

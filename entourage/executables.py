@@ -177,15 +177,21 @@ class Context:
         self._publish = []
         self._spawn = []
 
-    def send(self, destination, payload, *, key, kind="message"):
-        """Stage mail with a key stable across retries and unique per operation."""
+    def send(self, destination, payload, *, key, kind="message", request_id=None):
+        """Stage mail with a key stable across retries and unique per operation.
+
+        `request_id` tags mail that belongs to an exchange already opened by
+        `request` (steer, cancel, answer, ask, progress) so the other side can
+        match it; `reply` stamps it on the final result itself.
+        """
         if not isinstance(key, str) or not key:
             raise ValueError("publication key must be a nonempty string")
         event_id = "mail:" + _identity(self.session_id, key)
-        self._publish.append(Publication(destination, {
-            "event_id": event_id, "kind": kind, "source": self.session_id,
-            "payload": _json_copy(payload),
-        }))
+        event = {"event_id": event_id, "kind": kind, "source": self.session_id,
+                 "payload": _json_copy(payload)}
+        if request_id is not None:
+            event["request_id"] = request_id
+        self._publish.append(Publication(destination, event))
         return event_id
 
     def request(self, destination, payload, *, key):

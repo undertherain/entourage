@@ -1,10 +1,15 @@
 # NOW — Entourage execution runtime
 
-Last updated: **2026-10-05**. Current implementation entry point. Read README.md
+Last updated: **2026-10-10**. Current implementation entry point. Read README.md
 for the existing graph model, then this file. TODO.md retains earlier research
 and publication history; its July “current direction” is not the current build plan.
 
 ## Agreed direction
+
+**2026-10-10: work protocol, case A prototyped.** `ChatAgent` delegates through
+pipes with a panel (`entourage/panel.py`), wait and connected modes, promotion,
+and the provider side; design and build list in
+[work protocol](docs/work-protocol.md). Not yet run against a real model.
 
 **2026-10-05: the session core is the only scheduler.** Decided in
 [mailbox-first scheduling](docs/mailbox-first-scheduling.md): the graph runtime

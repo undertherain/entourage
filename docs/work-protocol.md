@@ -362,7 +362,19 @@ never sees a dangling tool call.
 
 ### What it takes to build
 
-A build list, not obstacles: where the concept lands in today's code. `ChatAgent`
+**Items 1 to 3 are built (2026-10-10, prototype):** `entourage/panel.py` is
+`Exchanges` grown into the panel; `ChatAgent` takes `pipes=[Pipe(...)]`, serves
+requests as a provider, and `tests/test_pipes.py` covers wait, connected,
+promotion by interruption, budget and question, cancel as a fence, a failed
+worker, and a fresh worker resuming a parked wait from the store. Decided while
+building: the provider's work status lives under the reserved state key
+`state["work"]` (`status`, and the `request` it answers), so `inspect` reads it
+without knowing the definition; `Exchanges.ingest` reports `ask` and `progress`
+without closing the exchange; `Context.send` takes `request_id` for mail on an
+open exchange. Ask is implemented as promotion only (the question becomes the
+tool result); `progress` is stored on the entry and not shown.
+
+The list as written before building, kept as the record: `ChatAgent`
 is Entourage's reference agent loop (`entourage/turn.py`, used by
 `examples/cli.py` and `coding_agent.py`); Second Brain's Concierge has its own
 `resume` and only borrows `litellm_complete`, so it would adopt the panel
@@ -394,13 +406,19 @@ separately.
 
 ## Next (where to pick up)
 
-Two candidates, neither started:
+Case A holds in tests; not yet run against a real model. Candidates:
 
-1. **Prototype build items 1 to 3:** one `ChatAgent` delegating to another
-   through a pipe, with the panel-mailbox pairing, wait, connect and promotion, and
-   a test. Shows whether case A holds before offers and opening checks exist.
-   Recommended first.
-2. **Case B, external callers** (Claude Code, Codex over MCP). They have no mailbox,
+1. **Run it for real:** an example with two `ChatAgent`s over litellm, to see
+   whether the status lines ("started as work …", "work … asks: …") steer a model
+   well, and whether `background` as a tool argument is picked sensibly.
+2. **Offers and opening checks** (build items 4 and the `panel.open` refusal):
+   today a `Pipe` declares `grants` by hand and nothing verifies the provider.
+3. **Forced cancel** at the runtime (gap 2): a session marked cancelled that
+   never wakes again, for providers that do not read their mailbox. Then a
+   grace period between cancel mail and the force.
+4. **Lift plain tools** (build item 5): a generic tool-runner session so a long
+   plain tool can go through a pipe.
+5. **Case B, external callers** (Claude Code, Codex over MCP). They have no mailbox,
    so only block or pull apply, with "a timeout becomes a handle" from the wire
    sketch, and `work_read` / `work_send` as the generic tools where a client lacks
    MCP Tasks. Not yet discussed beyond that.
@@ -476,6 +494,15 @@ above.
   caller is gone (the pull row). Clarified in conversation: "wire sketch" means
   the section of that name; "Ask" is the provider's `input_required`; "item 3"
   is `ChatAgent` as subagent. All of it to be adjusted as we prototype.
+
+- **2026-10-10** (prototype): build items 1 to 3 implemented and tested (see
+  *What it takes to build*). Findings from building: cancel keeps the panel entry
+  as a fence rather than dropping it, so the late result is matched and discarded
+  instead of hitting the strict unknown-mail rule; a failure notice closes the
+  entry and is the tool result of a wait; a connected result reaches the model
+  as a user-role message in brackets (provider support for mid-conversation
+  system messages is uneven); the provider completes after one request, so a
+  subagent is one job.
 
 Settled elsewhere, do not re-derive: wake-condition knobs and the resume helper
 (CbR as a library over state), each session as one stack frame with `reply_to` as

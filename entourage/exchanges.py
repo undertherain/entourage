@@ -12,6 +12,10 @@ parks again; the backend stays always-interruptible.
 from dataclasses import dataclass
 
 
+REPLY_KINDS = ("result", "ask", "progress")
+"""Mail a provider sends back on an exchange. Only `result` closes it."""
+
+
 @dataclass(frozen=True)
 class Reply:
     request_id: str
@@ -19,6 +23,9 @@ class Reply:
     source: str
     payload: object
     event: dict
+    kind: str = "result"
+    entry: dict = None
+    """The pending-table entry the reply matched (already removed for a result)."""
 
 
 class Exchanges:
@@ -45,16 +52,21 @@ class Exchanges:
         return child
 
     def ingest(self, mail):
-        """Split delivered mail into matched replies and everything else."""
+        """Split delivered mail into matched replies and everything else.
+
+        A `result` closes the exchange; `ask` and `progress` are reported with
+        the exchange still pending, so a caller can answer or show them.
+        """
         replies, others = [], []
         for event in mail:
-            pending = None
-            if event.get("kind") == "result":
+            pending, kind = None, event.get("kind")
+            if kind in REPLY_KINDS:
                 pending = self.table.get(event.get("request_id"))
             if pending is not None and event.get("source") == pending["to"]:
-                del self.table[event["request_id"]]
+                if kind == "result":
+                    del self.table[event["request_id"]]
                 replies.append(Reply(event["request_id"], pending["label"], pending["to"],
-                                     event.get("payload"), event))
+                                     event.get("payload"), event, kind, pending))
             else:
                 others.append(event)
         return replies, others

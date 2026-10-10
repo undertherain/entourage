@@ -269,24 +269,33 @@ Executable("research:v1", resume, offers=Offer(steer=True, cancel=True, ask=True
 A session provider is always `pend: always` (it replies in a later activation).
 An inline tool (`schema` + `execute`) is `pend: never` with nothing else: L0.
 
-**Caller: a pipe, declared where the agent is built.**
+**Caller: a pipe, opened at runtime.** Pipes are dynamic (user, 2026-10-10): the
+master agent finds a fitting subagent on the mesh and delegates to it. So the
+check happens when the pipe is opened, before any work is sent, not when code is
+registered. Like Go's `v, ok := x.(Steerable)`, opening returns a pipe or a refusal,
+and the caller must handle the refusal.
 
 ```python
-ChatAgent(complete, tools=[clock, search],
-          pipes=[Pipe("research:v1", label="research",
-                      modes=("wait", "connect"), default="wait", per_call=True,
-                      steer=True, cancel=True, ask="answer")])
+pipe, refusal = panel.open("research:v1", modes=("wait", "connect"),
+                           want={"steer": "required", "cancel": "optional"},
+                           ask="answer")
 ```
 
-**Checked when the executable is registered** (the in-shard equivalent of pipe
-creation), against the target's offer:
+- The provider's offer is read from the store (the persisted contract), so opening
+  costs no round trip to the provider.
+- Each wanted capability is `required` (missing → refusal) or `optional` (missing →
+  the pipe opens without it). The opened pipe says what was granted, and the
+  request mail carries it, so the provider knows what the caller can handle (the
+  "inform the other side" part).
+- An offer with `ask: true` and a caller with no Ask handler: refusal. `refuse` is
+  an explicit handler.
+- `connect` or a wait budget towards an inline tool: refusal, unless the caller
+  asks for `lift`, which runs the tool in a generic tool-runner child session
+  (cancel then works as a fence; steer never does).
+- A pipe fixed in code (`ChatAgent(pipes=[...])`) is just a pipe opened at start.
 
-- a capability the caller asks for and the offer lacks: error;
-- `connect` (or a wait budget) towards an inline tool: error, unless the pipe says
-  `lift=True`, which runs the tool in a generic tool-runner child session (cancel
-  then works as a fence; steer never does);
-- `ask: true` on the offer and no Ask handler on the pipe: error; `refuse` is an
-  explicit handler.
+Discovery itself (how the master searches the mesh) is outside the protocol. The
+protocol only needs every agent to publish its offer where a searcher can read it.
 
 ### Mail kinds on a pipe
 
@@ -296,8 +305,10 @@ status `completed | failed | cancelled`. Only `request` and `result` exist now.
 
 ### What the model sees
 
-- Each pipe is one tool. With `per_call` and both modes, the schema gets a
-  `background: bool` argument (the pipe's default applies when omitted).
+- Dynamic: `find_agents(query)` returns candidates with their offers;
+  `delegate(agent, task, background?)` opens the pipe and sends the request in one
+  step, and a refusal comes back as the tool result. A fixed pipe can still appear
+  as its own tool.
 - Panel tools appear only for capabilities some pipe actually offers:
   `steer(work, text)`, `cancel(work)`, `answer(work, text)`. A capability the
   pipe lacks is never shown, so the model cannot make the type error.
@@ -349,19 +360,29 @@ writes it early, as a status line, and turns the entry from `wait` into
 So promotion is one mechanism serving timeout, Ask and interruption, and the model
 never sees a dangling tool call.
 
-### Gaps in the current code
+### What the current code cannot do yet
 
-1. `ChatAgent.resume` raises on any mail kind but user, message and timer, so it
-   cannot receive replies. Panel ingest has to run first.
-2. `Exchanges.ingest` matches only `kind: result` and deletes the entry. The panel
-   needs non-terminal kinds (`ask`, `progress`) that keep the entry, plus status.
-3. `ChatAgent` cannot be a provider: it does not accept `request` mail, sends its
-   answer to `output` instead of `context.reply`, and has no `steer` kind.
-4. `Executable` has no offers, and the contract does not carry them.
-5. There is no tool-runner definition to lift an inline tool.
-6. The lease is the hard step limit (no renewal), so a blocking inline tool longer
-   than the lease fails the step. Today that is the only block mode, and the main
-   reason long tools need a pipe.
+1. **`ChatAgent` cannot receive a reply.** When it wakes, it goes through its new
+   mail and accepts only user messages and timer ticks. Anything else makes it
+   stop with an error, on purpose, so unknown mail is never silently dropped
+   (`turn.py`, the `raise ValueError("unexpected mail …")` line). A subagent's
+   answer arrives as mail of kind `result`, so today it would crash the agent's
+   turn; after three tries the session is marked failed. The panel has to look at
+   the mail first and take out what belongs to it.
+2. **`Exchanges` only understands final answers.** It recognises mail of kind
+   `result` and then forgets the request. A question or a progress note from the
+   subagent would not be recognised as belonging to that request.
+3. **`ChatAgent` cannot be the subagent.** It does not accept a `request` (that
+   would also hit the error in point 1), and when it finishes it sends the answer
+   to its fixed `output` address instead of back to whoever asked. It has no
+   notion of `steer` mail either.
+4. **Agents publish no offers.** The saved contract of a definition has no place
+   for "I accept steer, cancel, questions", so nothing can be checked or searched.
+5. **Plain tools cannot be lifted.** There is no generic session that runs a plain
+   tool in the background, so a plain tool can only run inside the agent's turn.
+6. **A plain tool must finish within the turn's time limit.** The lease is the hard
+   limit for one turn (30 s by default, never extended). A tool that runs longer
+   kills the turn. That is why long tools need a pipe at all.
 
 ## Open
 
@@ -408,6 +429,10 @@ above.
   panel as grown `Exchanges`, panel tools shown only for offered capabilities.
   Finding: wait is connect with the tool result deferred; promotion (timeout, ask,
   interruption) writes it early. Six code gaps listed.
+- **2026-10-10**: pipes are dynamic (user): the master finds a subagent on the
+  mesh and delegates, so the check moves from registration to opening the pipe;
+  capabilities wanted as required or optional; fixed pipes are pipes opened at
+  start. Discovery is outside the protocol. Gaps rewritten in plain words.
 
 Settled elsewhere, do not re-derive: wake-condition knobs and the resume helper
 (CbR as a library over state), each session as one stack frame with `reply_to` as

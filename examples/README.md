@@ -14,6 +14,7 @@ The other examples all run on the same dispatcher and SQLite store:
 | Area | Examples |
 | --- | --- |
 | Interactive agents | [cli.py](cli.py), [coding_agent.py](coding_agent.py): one model call per activation, tools inline, the conversation is session state |
+| Deferred tools | [tool_loop.py](tool_loop.py): shared `Pending`, `Lifted` and `ToolRunner`; buffers a user amendment while a tool runs. Add `--chat-agent` to use the SDK loop instead of the bare loop. No model key needed |
 | Transports | [telegram_group_manager.py](telegram_group_manager.py): one session per chat, triage as a phase or as a per-event labeling session, an outbox session for delivery |
 | Children and waiting | [spawn_supervisor.py](spawn_supervisor.py): fork-join, supervisor join with a death notice, impatience; [waiting_session.py](waiting_session.py): the three wake sources; [remote_tool_ingress.py](remote_tool_ingress.py): a remote reply in time and too late |
 | Failure policy | [retry_timeout.py](retry_timeout.py): attempt limits, backoff, a stale commit after lease expiry |

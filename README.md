@@ -71,9 +71,10 @@ worker.
 Two things follow directly:
 
 - **An agent is one model call per activation.** `entourage.turn.ChatAgent` keeps the
-  conversation in state, runs tool calls inline, checkpoints the tool results and lets
-  the next activation call the model again. A user message that arrives while tools run
-  is seen by the model on the next wake, which is what makes steering possible.
+  conversation in state, runs tools inline or awaits deferred results, checkpoints
+  the tool results and lets the next activation call the model again. Inline tools
+  allow a user message to join on the next wake. A deferred tool under strict await
+  buffers user messages until every outstanding result is in.
 - **A workflow is a phase table.** `state["phase"]` names where to reconsider; the
   handler reads it, does the step, writes the next phase. A checkpoint between two steps
   is `propose(state, deadline=NOW)`.
@@ -89,6 +90,14 @@ Between sessions there are three relations, and they are the whole coordination 
 `entourage.exchanges` keeps the pending table in state and splits delivered mail into
 the replies a session waited for and everything else, so a parent can run an `all` or
 `any` join and still take a correction while it waits.
+
+Plain tools can run in their own sessions using `entourage.deferred_tools`:
+`Lifted(tool)` keeps the tool's schema and returns `Pending(definition, payload)`.
+Register `ToolRunner([tool]).resume` as `tool-runner:v1`; `ChatAgent` spawns the
+provider and records the awaited call in the same checkpoint. The caller parks
+and resumes from saved state when the result arrives. The runner has its own
+lease limit. See the [deferred-tool contract](docs/work-protocol.md#using-deferred-tools)
+and `python examples/tool_loop.py --chat-agent` for a demo requiring no model key.
 
 ### A worked example
 

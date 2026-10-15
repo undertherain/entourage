@@ -11,62 +11,21 @@ arrives while a slot is open is held in state until the slot fills, so the
 model never sees a tool call without its result.
 
 `python examples/tool_loop.py` runs a scripted demo with no model or key.
+Add `--chat-agent` to run the same scenario through the SDK's ChatAgent.
 """
 
+import argparse
 import json
 import sqlite3
-import sys
-from dataclasses import dataclass
 from pathlib import Path
 
+from entourage.deferred_tools import Lifted, Pending, ToolRunner, run_tool
 from entourage.executables import Dispatcher, Executable
 from entourage.sessions import LocalSessions
+from entourage.turn import ChatAgent
 
 NOW = 0.0
 """A deadline already in the past: the session runs again at once."""
-
-
-# -- tools: inline, or lifted into a session of their own ------------------
-
-@dataclass(frozen=True)
-class Pending:
-    """A tool's answer "run this elsewhere": what to spawn and what to send it."""
-    definition: str
-    payload: dict
-
-
-class Lifted:
-    """Run a tool in its own session, so the loop's turn ends and the tool has its own lease."""
-
-    def __init__(self, tool, runner="tool-runner:v1"):
-        self.tool, self.schema, self.runner = tool, tool.schema, runner
-
-    def execute(self, **arguments):
-        return Pending(self.runner, {"name": self.schema["function"]["name"],
-                                     "arguments": arguments})
-
-
-class ToolRunner:
-    """A session that runs one tool call and replies with the result."""
-
-    def __init__(self, tools):
-        self.tools = {tool.schema["function"]["name"]: tool for tool in tools}
-
-    def resume(self, context, state, mail):
-        request = next(event for event in mail if event["kind"] == "request")
-        context.reply(request, {"text": run_tool(self.tools, request["payload"]["name"],
-                                                 request["payload"]["arguments"])})
-        return context.propose(state, incorporated=[e["event_id"] for e in mail], complete=True)
-
-
-def run_tool(tools, name, arguments):
-    try:
-        result = tools[name].execute(**arguments)
-    except KeyError:
-        return f"Tool error: unknown tool {name!r}"
-    except Exception as exc:  # noqa: BLE001 - the model must see the failure
-        return f"Tool error ({type(exc).__name__}): {exc}"
-    return result if isinstance(result, (str, Pending)) else json.dumps(result)
 
 
 # -- the loop ---------------------------------------------------------------
@@ -172,13 +131,14 @@ def answers(store, session="ui"):
             "SELECT event FROM wake_inputs WHERE session_id = ? ORDER BY seq", (session,))]
 
 
-def demo(store, say=print):
+def demo(store, say=print, *, chat_agent=False):
     """Two turns: a lifted tool parks the loop, the user types meanwhile, the answer still lands."""
     complete = scripted(
         {"role": "assistant", "content": None, "tool_calls": [tool_call("c1", "weather", city="Kyoto")]},
         {"role": "assistant", "content": "Sunny in Kyoto. And yes, I will keep it brief."},
     )
-    loop = ToolLoop(complete, [Lifted(Weather())], output="ui")
+    loop_type = ChatAgent if chat_agent else ToolLoop
+    loop = loop_type(complete, [Lifted(Weather())], output="ui")
     # One dispatcher per definition, so the demo controls who runs when; a
     # deployment would run them all in one worker and let it interleave.
     ui = Dispatcher(store).register(Executable("ui:v1", lambda ctx, state, mail: ctx.propose(
@@ -193,8 +153,9 @@ def demo(store, say=print):
 
     def status(label):
         chat = store.inspect("chat")
-        say(f"{label:<44} chat={chat['status']:<8} slots={len(chat['state'].get('slots', {}))} "
-            f"held={len(chat['state'].get('held', []))}")
+        slots = chat["state"].get("panel" if chat_agent else "slots", {})
+        held = chat["state"].get("buffered" if chat_agent else "held", [])
+        say(f"{label:<44} chat={chat['status']:<8} slots={len(slots)} held={len(held)}")
 
     store.append("chat", {"event_id": "u1", "kind": "user", "payload": {"text": "Weather in Kyoto?"}})
     status("user asks")
@@ -216,8 +177,12 @@ def demo(store, say=print):
 
 
 if __name__ == "__main__":
-    base = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", nargs="?", type=Path, default=Path("."))
+    parser.add_argument("--chat-agent", action="store_true", help="use ChatAgent instead of the bare loop")
+    args = parser.parse_args()
+    base = args.directory
     db = base / "tool_loop.db"
     if db.exists():
         db.unlink()
-    demo(LocalSessions(db))
+    demo(LocalSessions(db), chat_agent=args.chat_agent)

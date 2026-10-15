@@ -44,6 +44,11 @@ class Panel(Exchanges):
         replies, others = super().ingest(mail)
         for reply in replies:
             entry = reply.entry
+            if entry["status"] == "cancelled":
+                # Preserve the caller's fence, including entries saved by older
+                # workers. A provider reporting cancelled below is an outcome.
+                entry["fenced"] = True
+                continue
             if reply.kind == "ask":
                 entry["status"] = "input_required"
                 entry["question"] = (reply.payload or {}).get("text")
@@ -51,8 +56,7 @@ class Panel(Exchanges):
                 entry["progress"] = (reply.payload or {}).get("text")
             else:
                 status = (reply.payload or {}).get("status", "completed")
-                if entry["status"] != "cancelled":
-                    entry["status"] = status
+                entry["status"] = status
         return replies, others
 
     def find(self, work):

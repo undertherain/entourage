@@ -1,10 +1,246 @@
 # Work protocol — a durable handle between callers and providers
 
-Brainstorm of 2026-10-08 (in Second Brain), moved here 2026-10-10 as a **draft**.
-Nothing here is built as a protocol; this doc names what the session core already
-does and the gaps. Decide against it, not from it. The first application, Library
-proposals, lives in Second Brain:
+Brainstorm of 2026-10-08 (in Second Brain), moved here 2026-10-10. Clarified from
+first principles on **2026-10-14**, with SDK/context direction and a staged build
+plan recorded **2026-10-15**. This is a **design draft with local prototypes**,
+not a complete protocol implementation. The first-principles section is the
+current explanation; older wire and API sketches remain proposals where marked.
+The first application, Library proposals, lives in Second Brain:
 `~/Projects/Second Brain/_development_tasks/work-protocol.md`.
+
+## Start at the call site
+
+A calls B somewhere in its logic: B may be a plain tool, another agent, or a
+service. The first choice is whether A needs B's result before taking its next
+logical step. Call these **await** and **continue**. They describe A's control
+flow, independently of process residency and result delivery.
+
+| Question | Choices |
+|---|---|
+| Does A's next logical step require B's result? | await / continue |
+| If awaiting, can A release its execution? | block / checkpoint and resume |
+| How does A learn about changes? | open connection / mailbox / pull |
+
+Not every combination is supported by every endpoint. The pipe checks what the
+two sides can honour when it opens; capability negotiation is still unbuilt.
+The current prototype calls await `wait` and continue `connected` when the
+result is delivered through A's mailbox.
+
+### Await: the result belongs to the current step
+
+The ordinary LLM tool loop is: model requests tool → tool finishes → append the
+tool response → call the model again. A cannot take that next model step until
+the response is present. There are two ways to execute the same logic:
+
+- **A cannot checkpoint and resume.** An adapter promising the actual result
+  keeps the call open until B finishes, subject to the call's limits. A's process
+  or connection remains occupied. Returning a handle instead changes that
+  promise and requires A to know how to use it.
+- **A can checkpoint and resume.** Record the outstanding call and where to
+  continue, then park. When the result arrives, restore state, fill the slot,
+  append the tool response, and take the next step. No worker needs to be held
+  while waiting; whether a process stays warm is a separate residency policy.
+
+Resuming at arbitrary Python instructions is unnecessary. A known continuation
+such as "collect outstanding tool results, then call the model" suffices. The
+session core restores explicit state at `resume`, not a saved Python stack.
+
+A strict await can buffer user messages until the tool responds. This keeps the
+conversation sequence simple and avoids model turns just to check progress.
+An interruptible await may instead be promoted to continue when A needs a model
+turn to handle a user message or B's question. Promotion closes the original
+tool call with a status response and retains the outstanding work.
+
+### Continue: acceptance now, result later
+
+A starts B and proceeds without B's final result. In an LLM loop, the immediate
+tool response acknowledges acceptance and identifies the work: "started as work
+X; the result arrives later." That closes the model's tool call. The eventual
+result enters as a new conversation event rather than filling an unresolved
+tool response. A continuing caller may receive mailbox notifications or retain
+a handle and pull later; a mailbox is one delivery choice.
+
+Starting work and registering it for A must be one durable operation before
+success is reported. For a locally spawned provider, the prototype commits the
+child, request, caller state and panel entry in one checkpoint. Distributed
+delivery will need equivalent guarantees through an outbox and deduplication;
+it is not implemented yet.
+
+### Outstanding work and the panel
+
+The **panel** is the agent's view of its outstanding work. Its backing registry
+tracks both awaited and continuing calls: identity, correlation, status, mode
+and available controls. It is not limited to background work. In the prototype
+this is the `Panel` table in session state, built on `Exchanges`.
+
+Receiving through a mailbox does not imply continue: an awaiting A can use the
+same mailbox to wake and resume its logical step. Conversely, continue does not
+require mailbox delivery if A can inspect a durable handle later.
+
+### Correlation and trusted delivery
+
+A must associate an incoming result with its outstanding call. Today
+`Exchanges.ingest` matches both `request_id` and the expected `source`. This is
+correlation in a trusted local store: a sender name is not an authenticated
+identity, and a correlation ID is not proof that B sent the event.
+
+**Proposed responsibility boundary, not yet implemented:** opening a pipe
+arranges a return route that only the authorised provider can use. The messaging
+or transport layer enforces the sender's authority; the panel checks which
+outstanding work the event belongs to. Whether this uses a restricted reply
+capability, authenticated worker identity, or key exchange is open. The LLM does
+not manage credentials. The same authority checks are needed for controls sent
+from A to B.
+
+### Current build status
+
+| Part | Status |
+|---|---|
+| `ChatAgent` delegation through `Pipe` and `Panel` | prototyped and covered by scripted tests: wait, connected, promotion, controls, failure and restart |
+| `Pending`, `Lifted`, `ToolRunner` | shared SDK primitives in `entourage.deferred_tools`; `ChatAgent` strictly awaits pending tool results; bare and SDK demo variants use the same primitives |
+| `Pending` underneath `Pipe` | next implementation step; pipes still dispatch separately from ordinary tool outcomes |
+| Provider offers and dynamic opening checks | proposed; prototype grants are declared by hand |
+| Blocking adapter for a caller that cannot resume | described here; not implemented as a generic protocol adapter |
+| Cooperative cancel and caller-side result fence | prototyped; forced cancel after a grace period remains unbuilt |
+| Independently attachable work handle | session inspection exists; reattachment and delivery after the original caller is gone remain incomplete |
+| Authenticated pipe endpoints, reactive stream, external-caller adapter | unbuilt |
+
+Case A has not been run against a real model. The wire sketch below and its
+shared update-log contract are proposals, not guarantees of these prototypes.
+
+### Using deferred tools
+
+Implemented 2026-10-15. A tool keeps `schema` and `execute(**arguments)`. A final
+result becomes text (non-string results are JSON-encoded); `Pending(definition,
+payload)` asks the caller to spawn and request a provider instead. `ChatAgent`
+registers the outstanding call in the existing panel, matching results by
+request ID and expected provider. User amendments are buffered until all strict
+waits resolve, including when results span input batches or workers restart.
+
+```python
+from entourage.deferred_tools import Lifted, ToolRunner
+from entourage.executables import Dispatcher, Executable
+from entourage.turn import ChatAgent
+
+# store, complete and tool are supplied by the application.
+worker = Dispatcher(store)
+worker.register(Executable("tool-runner:v1", ToolRunner([tool]).resume),
+                lease_seconds=600)
+worker.register(Executable("chat:v1", ChatAgent(complete, [Lifted(tool)]).resume))
+worker.create("chat", "chat:v1", {})
+store.append("chat", {"event_id": "user:1", "kind": "user",
+                      "payload": {"text": "Use the tool to investigate this."}})
+worker.run_until_idle()
+```
+
+`Lifted(tool, runner="tool-runner:v1")` is an adapter; the registered runner owns
+the actual tool instances. A custom tool can return `Pending` directly to target
+another provider definition. Providers receive a `request` and must reply with
+`payload.text` through `context.reply`; terminal `status` defaults to completed.
+Reported failure/cancellation is a visible outcome. A caller-side cancellation
+fence still discards late results for work A cancelled itself.
+
+`ToolRunner` runs one plain tool and completes. Lookup, execution and result
+encoding errors become tool-result text, matching inline execution. A runner
+tool must return a final result; nested `Pending` becomes a tool error. The runner
+rejects unexpected mail rather than silently consuming it. Lifted tools offer
+no interactive controls in this slice.
+
+Lifting releases A's activation; B must still finish within its own lease. There
+is no lease renewal or forced kill. External side effects still require retry-safe
+operation identities or reconciliation. As with pipes, a provider that exhausts
+its attempts needs a runner failure notice delivered to A; a bare `Dispatcher`
+does not publish those notices automatically. Use the shard's notification route
+or `runner.notify_failures(store, caller_session)` for the local proof.
+
+Run `python examples/tool_loop.py --chat-agent` for the scripted SDK scenario;
+omit the flag for the bare-loop explanation. Both use the shared deferred-tool
+implementation. Validation is recorded under *Next*.
+
+## Agent SDK direction (2026-10-15)
+
+The intended SDK is the reusable core of an interactive, tool-using agent:
+model loop, mailbox ingestion at safe points, pipes, outstanding-work panel and
+context lifecycle. Coding is one application, supplying tools, prompts and
+policies; CLI and chat are interfaces to it. The execution runtime supplies
+checkpoints, durable delivery, leases, retries and workers underneath.
+
+Two representative cases keep the design grounded:
+
+| Case | Smallest useful behaviour |
+|---|---|
+| Autonomous automation | ordinary model/tool loop, awaited results, no application-facing mailbox or panel required |
+| Interactive assistant | user amendments during work, await or continue per call, questions and results arriving later, panel controls |
+
+Shared contracts and invariants should cover both; optional policies supply
+the richer behaviour. A durable runner may use mail internally without making
+an automation author manage it. No universal context strategy is required.
+
+### Snapshot/resume with outstanding work
+
+A checkpoints its own state, continuation and outstanding requests. B progresses
+independently and sends a result to A's durable inbox. A incorporates that result
+and acknowledges the input in the same checkpoint. A simultaneous snapshot of
+all agents is unnecessary for message-based coordination.
+
+Local atomic publication, stable operation identities, durable inboxes and lease
+fencing supply the foundation. Distributed delivery remains future work. Task
+revision is a proposed addition: a result may be correctly delivered but based
+on an earlier direction. Keep that provenance so A can decide its relevance;
+an amendment does not automatically cancel all earlier work.
+
+A crash during a black-box external operation still leaves an uncertain outcome
+if the operation succeeded before its result was committed. Snapshot recovery
+does not solve that: use an idempotency key, receipt/status lookup, or an explicit
+unknown outcome. Session-commit fencing does not fence external side effects.
+
+### Current direction and composable context
+
+Keep three representations distinct:
+
+- **Event history:** what arrived and happened, with source and provenance.
+- **Working state:** current objective, constraints, decisions and outstanding work.
+- **Model context:** a bounded, linear projection for the next model decision.
+
+User input may amend working state instead of merely extending a transcript.
+For example, "investigate A and B", then "leave B for later" yields an active
+objective A and deferred work B. Preserve the originating input; do not silently
+discard qualifications or guess at ambiguous amendments. Interpreting arbitrary
+natural-language amendments is a separate policy and may require model judgment.
+
+The model's input is linear; the working state need not be. Proposed replaceable
+policies cover input interpretation, context assembly and compaction. One owner
+makes the final context decision; other capabilities contribute facts, tools or
+evidence. Tool-call/result validity, source attribution and provider continuation
+requirements constrain every projection.
+
+There is an existing seed in `entourage.capabilities`: contributive capabilities,
+one `ConversationLifecycle`, and `TurnPlan.view` separate from stored history.
+These hooks belong to earlier drivers and are not wired into the current
+`ChatAgent`. Reuse their ownership principle; their exact API is not yet chosen
+for the new loop. Earlier context/history discussion is in
+[conversation mailboxes](conversation-mailboxes.md#three-independent-histories).
+
+**Cache-aware projection is an experiment, not a default guarantee.** Appending
+an amendment preserves an existing prefix; rewriting an earlier block can lose
+reuse after that point. A shorter prompt is not necessarily cheaper. Candidate
+layout: stable instructions/tools → stable task checkpoint → recent valid
+exchanges → latest direction and relevant new information. Consolidate amendments
+periodically rather than rewriting the early checkpoint every call. Measure
+cache hits, uncached input, latency and output quality; provider rules differ.
+See [Claude prompt-cache diagnostics](https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics).
+
+### Temporal comparison
+
+Temporal overlaps substantially with the runtime and supports agent frameworks;
+it is a useful baseline. The user's preference is explicit snapshot/resume over
+history replay. Nexus is worth studying before extending our wire protocol:
+it already models inline results, ongoing operations, callbacks and cancellation.
+This does not commit us to a Temporal backend or Nexus adoption. The SDK's loop,
+context and interaction policies remain a distinct layer. References:
+[Workflow replay](https://docs.temporal.io/workflows),
+[agent integrations](https://docs.temporal.io/integrations),
+[Nexus specification](https://github.com/nexus-rpc/api/blob/main/SPEC.md).
 
 ## Why
 
@@ -86,19 +322,20 @@ mailbox, a revision, readable from the store without consuming anything.
 | correlation key | `request_id` (the child key for spawned work) |
 | steer | `append` to the session: always-interruptible, the handler sees it at the next wake |
 | answer | an ordinary reply event; the handler matches it through `Exchanges.ingest` |
-| replayable update log | each session's committed mail and revisions; no cross-session feed |
+| replayable update log | retained mail and the current snapshot exist; no general update log, past-checkpoint replay or cross-session feed |
 
 Gaps, in order of how soon a consumer will hit them:
 
 1. **Work status is not session status.** `ready/active/waiting/complete/failed`
    is *scheduling* status. `input_required`, `cancelled` and `expired` are about
    the work, and live in application state today. The protocol needs the work
-   status readable without knowing each definition's state layout: a reserved
-   state key, or a status the proposal sets.
-2. **No cancel.** Parking and completion cancel nothing, by design (children and
-   outstanding requests are independent). Cancel today is a steering message the
-   handler chooses to honour. Whether the runtime should know a cancelled state,
-   and whether it reaches children, is open.
+   status readable without knowing each definition's state layout. The
+   `ChatAgent` prototype uses the reserved key `state["work"]`; a shared contract
+   for other providers remains to be defined.
+2. **No forced cancel.** Parking and completion cancel nothing, by design
+   (children and outstanding requests are independent). The prototype sends
+   cancel mail, honours it in `ChatAgent`, and fences late results at the caller.
+   Runtime enforcement after a grace period and propagation to children are open.
 3. **No owner principal.** The store is a trusted local API; senders are names,
    not credentials. Who may attach, steer or cancel is the deployment's policy
    (Second Brain's toolplane), not the session core's.
@@ -165,6 +402,10 @@ send(handle, kind=answer|steer|cancel, body, if_revision=)
   Second Brain's `modules/work` fences the same way).
 
 ## The pipe: declared when it is created (in discussion, 2026-10-10)
+
+This section preserves the original discussion and its wait/connect vocabulary.
+The current explanation above separates those logical modes from delivery and
+execution policy. The opening checks below describe the intended contract.
 
 **User direction.** Get both worlds by opting in when the pipe between A and B is
 created, the way C, Go and Rust force a caller to check an error value, or a
@@ -250,8 +491,11 @@ A cannot answer): leave it to the LLM and B until a real case needs a rule.
 
 ## Case A worked through: `ChatAgent` with pipes (proposed 2026-10-10)
 
-Checked against `entourage/turn.py`, `entourage/exchanges.py` and `Context` in
-`entourage/executables.py` as of `4e83479`. Nothing here is built.
+Originally checked against `entourage/turn.py`, `entourage/exchanges.py` and
+`Context` in `entourage/executables.py` as of `4e83479`. The later prototype
+implements the loop and panel behaviour described below; offers and negotiated
+opening remain proposed. Code snippets in *Declarations* sketch the intended
+API, not the current API.
 
 ### Declarations
 
@@ -276,7 +520,7 @@ registered. Like Go's `v, ok := x.(Steerable)`, opening returns a pipe or a refu
 and the caller must handle the refusal.
 
 ```python
-pipe, refusal = panel.open("research:v1", modes=("wait", "connect"),
+pipe, refusal = panel.open("research:v1", modes=("wait", "connected"),
                            want={"steer": "required", "cancel": "optional"},
                            ask="answer")
 ```
@@ -301,22 +545,26 @@ protocol only needs every agent to publish its offer where a searcher can read i
 
 A to B: `request` (with `reply_to`, exists today), `steer`, `cancel`, `answer`.
 B to A, each carrying `request_id`: `progress`, `ask`, and `result` with a final
-status `completed | failed | cancelled`. Only `request` and `result` exist now.
+status `completed | failed | cancelled`. The prototype supports these mail kinds;
+`progress` is retained on the panel entry without being shown to the model.
 
 ### What the model sees
 
-- Dynamic: `find_agents(query)` returns candidates with their offers;
+- Proposed dynamic tools: `find_agents(query)` returns candidates with their offers;
   `delegate(agent, task, background?)` opens the pipe and sends the request in one
   step, and a refusal comes back as the tool result. A fixed pipe can still appear
   as its own tool.
-- Panel tools appear only for capabilities some pipe actually offers:
+- Proposed: panel tools appear only for capabilities some pipe actually offers:
   `steer(work, text)`, `cancel(work)`, `answer(work, text)`. A capability the
-  pipe lacks is never shown, so the model cannot make the type error.
+  pipe lacks is rejected for that work. The prototype exposes tools from the
+  union of manually declared pipe grants; provider verification and per-work
+  capability enforcement remain to be built.
 
 ### The panel entry
 
-`Exchanges` grows into the panel: the same table in state, keyed by `request_id`,
-with what the protocol needs.
+`Exchanges` grows into the panel: the same table in state, keyed by `request_id`.
+This sketches the intended entry, including negotiated offers that the prototype
+does not yet store.
 
 ```json
 "panel": {"<request_id>": {"to": "<child session>", "label": "research",
@@ -339,9 +587,10 @@ with what the protocol needs.
    - **wait**: append nothing yet. The model cannot be called while a tool call
      has no result (the chat-completions message rule), so the session parks
      until every waited reply is in, or the wait budget's deadline passes.
-3. Panel tools: `steer` and `answer` send to the child; `cancel` sends `cancel`,
-   marks the entry `cancelled` at once and `Exchanges.drop`s it, so a late result
-   is ordinary mail (MCP's rule: cancelled stays cancelled).
+3. Panel tools: `steer` and `answer` send to the child; `cancel` sends `cancel`
+   and marks the entry `cancelled` at once. The entry is kept as a fence until
+   the final result arrives, so that result is matched and discarded rather
+   than reaching the strict unknown-mail check. This does not force B to stop.
 
 ### Finding: wait is connect with the tool result deferred
 
@@ -438,23 +687,77 @@ with modes and controls on top.
 
 ## Next (where to pick up)
 
-Case A holds in tests; not yet run against a real model. The bare loop is in
-`examples/tool_loop.py`. Candidates:
+**Build one small proof in two modes before expanding the framework.** A asks B
+to compare two storage options; the user defers the second while work is
+outstanding; the caller restarts; the result arrives; the next model decision sees the amendment
+and the result with its provenance. Exercise strict await and continue. The
+strict version buffers the amendment until the slot fills; the interactive
+version closes the tool call with an acknowledgment and handles the amendment
+while work remains outstanding.
 
-1. **Run it for real:** an example with two `ChatAgent`s over litellm, to see
-   whether the status lines ("started as work …", "work … asks: …") steer a model
-   well, and whether `background` as a tool argument is picked sensibly.
-2. **Offers and opening checks** (build items 4 and the `panel.open` refusal):
+This is the implementation sequence. Each step should leave a working
+example and a reviewable change, using the existing session runtime.
+
+1. **Done 2026-10-15: share the deferred-tool primitive.** Extract `Pending`, `Lifted` and
+   `ToolRunner` from `examples/tool_loop.py` into the SDK. Teach `ChatAgent` to
+   handle an immediate result or `Pending` through one outcome path, initially
+   with strict await. Record expected provider as well as request/tool-call IDs
+   and surface provider failure as a tool outcome. Proof: inline and lifted
+   versions of the same tool, a correction during the wait, multiple open calls,
+   and a fresh worker recovering the saved slots. Reuse existing fixtures.
+   Built in `entourage.deferred_tools` and integrated into `ChatAgent`; the
+   existing panel tracks strict waits. The SDK demo is `tool_loop.py --chat-agent`.
+   Focused tests cover parity of inline/lifted outcomes, multiple calls, bounded
+   batches, provider matching, failure notices and actual subprocess recovery.
+   Validation: **31 passed** across `test_turn.py`, `test_deferred_tools.py`,
+   `test_tool_loop.py` and `test_pipes.py`; full repository regression
+   **312 passed, 132 skipped**. Commands use
+   `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider`, with the
+   four test paths for the focused run and no paths for the full run.
+2. **Put pipes and the panel on that path.** Make `Pipe` produce deferred work
+   through the shared mechanism; keep wait/connected, promotion, questions and
+   controls working. Commit registration with dispatch. Record and enforce
+   controls for each work item, using explicit grants until offers are built.
+   Proof: run the existing pipe scenarios through the shared path, including
+   restart, strict buffering, promotion and late-result cancellation fencing.
+3. **Add one context-policy seam and one direction example.** Keep transcript
+   assembly as the default. Allow one context owner to project working state
+   and valid recent exchanges at the next model boundary. Use an explicit,
+   structured amendment in the example to update objective/constraints and a
+   task revision; retain the originating input and the revision under which
+   work was dispatched. Proof: the same amendment/restart scenario with default
+   transcript assembly and with a current-direction projection. No automatic
+   natural-language interpretation or compaction framework in this step.
+4. **Try the slice with a real model.** Use two agents and an inspectable trace
+   of the actual model inputs, state, outstanding work and outcomes. Check that
+   acknowledgments, questions and amendments lead to sensible decisions.
+   Compare append-only and projected context using provider usage/cache metrics
+   and answer quality. This experiment informs defaults; shorter input alone
+   is not evidence of lower cost.
+
+**Immediate next code change: step 2.** The shared deferred-tool primitive is
+built; pipes still have their own dispatch path. The remaining sequence integrates
+that path and makes the context seam concrete.
+
+After that slice, without a fixed order:
+
+- **Offers and opening checks** (build item 4 and the proposed opening refusal):
    today a `Pipe` declares `grants` by hand and nothing verifies the provider.
-3. **Forced cancel** at the runtime (gap 2): a session marked cancelled that
-   never wakes again, for providers that do not read their mailbox. Then a
-   grace period between cancel mail and the force.
-4. **Lift plain tools** (build item 5): a generic tool-runner session so a long
-   plain tool can go through a pipe.
-5. **Case B, external callers** (Claude Code, Codex over MCP). They have no mailbox,
-   so only block or pull apply, with "a timeout becomes a handle" from the wire
+   Enforce granted controls for each work item as well as at opening.
+- **Forced cancel** at the runtime (gap 2): cancel mail first, a grace period,
+   then stop further activations and fence an in-flight activation's commit.
+   Stopping the running computation also needs execution-backend support.
+- **Independent handle lifetime:** allow another session to attach and inspect
+   work after the original caller is gone; define what happens to delivery to
+   the old address. A durable panel entry alone does not provide this.
+- **Trusted return routes:** define endpoint authority and where it is enforced;
+   do not treat matching `source` and `request_id` as authentication.
+- **Case B, external callers** (Claude Code, Codex over MCP). Without a mailbox,
+   block or pull apply, with "a timeout becomes a handle" from the wire
    sketch, and `work_read` / `work_send` as the generic tools where a client lacks
    MCP Tasks. Not yet discussed beyond that.
+- **Richer context policies:** natural-language direction updates, automatic
+   compaction and cache-aware layout tuning, guided by the small experiment.
 
 ## Open
 
@@ -462,8 +765,11 @@ Case A holds in tests; not yet run against a real model. The bare loop is in
   input_required, completed, failed, cancelled) and add our own as needed
   (`expired`, and whatever the prototype shows). Open: the exact list.
 - Forced cancel: how the runtime marks a session cancelled so it never wakes
-  again, and kills a running activation (gap 2). Needed for the "dumb subagent"
-  case below.
+  again, fences commits and stops a running activation (gap 2). Needed for a
+  provider that does not read cancel mail, such as a lifted plain tool.
+- Endpoint authority: restricted reply capabilities, authenticated identities,
+  or key exchange; the proposed responsibility boundary is in *Correlation and
+  trusted delivery*. The store is currently trusted and local.
 - Where the interface lives as code: here (it is coordination, and Second Brain
   depends on Entourage), or in Second Brain's core next to the dataplane, whose
   records (intake, proposal, `modules/work` tasks) are handles without being
@@ -477,7 +783,37 @@ Case A holds in tests; not yet run against a real model. The bare loop is in
 ## Discussion log
 
 Short and dated, so ideas are not proposed twice. Detail lives in the sections
-above.
+above. This is a historical record: later entries and the current explanation
+supersede earlier proposals where they differ.
+
+- **2026-10-15 (implementation):** extracted `Pending`, `Lifted`, `ToolRunner`
+  and tool-result conversion into `entourage.deferred_tools`. `ChatAgent` now
+  strictly awaits ordinary tools returning `Pending`, using its existing panel
+  and buffered-message handling. The bare demo imports the shared implementation;
+  `--chat-agent` exercises the SDK. Added mixed-call, bounded-batch, provider-match,
+  failure and fresh-process recovery coverage. Corrected provider-reported
+  cancellation handling so it resolves a wait; the caller's own cancellation
+  fence continues to discard late results. Step 2 is next.
+
+- **2026-10-15**: clarified the product as a reusable agent harness over the
+  execution runtime, with autonomous awaited automation and an interactive
+  assistant as the two representative cases. Snapshot/resume tracks local
+  state and outstanding messages; globally simultaneous snapshots are unnecessary
+  for this ownership model. Black-box side effects retain outcome uncertainty.
+  User input can update current direction; event history, working state and
+  linear model context are separate. Context policies should be replaceable,
+  with one final owner and a simple transcript default. Cache reuse trades off
+  against rewriting and compaction. User requested logging and a concrete build
+  sequence: shared `Pending` → pipes/panel → one context seam → real-model proof.
+  Broader protocol and context features remain later work.
+
+- **2026-10-14**: first-principles discussion distinguishes logical await/continue,
+  execution blocking/checkpointing, and connection/mailbox/pull delivery. Known
+  continuations suffice; outstanding-work tracking applies to both modes.
+  Starting work and recording it belong in one durable operation. Endpoint
+  authentication raised as an open design question; matching a sender name and
+  correlation ID is not proof of origin. Documentation reconciled with the
+  prototypes; `Pending` underneath pipes is the immediate next step.
 
 - **2026-10-08** (Second Brain): handle as the primitive; pull / reactive /
   proactive attachments; documents are files, state is records.

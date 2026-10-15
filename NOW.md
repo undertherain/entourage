@@ -1,10 +1,40 @@
 # NOW — Entourage execution runtime
 
-Last updated: **2026-10-10**. Current implementation entry point. Read README.md
-for the existing graph model, then this file. TODO.md retains earlier research
+Last updated: **2026-10-15**. Current implementation entry point. Read README.md
+for the session model, then this file. TODO.md retains earlier research
 and publication history; its July “current direction” is not the current build plan.
 
 ## Agreed direction
+
+**2026-10-15: narrow the SDK work to one demonstrable slice.** The reusable agent
+harness supports a simple awaited automation and an interactive assistant.
+Event history, current direction/working state and model context are distinct;
+context assembly should be replaceable, with one owner and a transcript default.
+Proposed build sequence: shared `Pending` and lifted tools → pipes/panel on that
+path → one context-policy seam → a real-model amendment/restart example.
+Step 1 is built: `entourage.deferred_tools` provides `Pending`, `Lifted` and
+`ToolRunner`; `ChatAgent` strictly awaits their results through the existing panel.
+The same scripted example runs bare or with `--chat-agent`, and tests include
+multiple calls, buffered amendments, failures and fresh-process recovery.
+Validation: **31 focused tests passed** (`test_turn`, `test_deferred_tools`,
+`test_tool_loop`, `test_pipes`); repository regression **312 passed, 132 skipped**.
+**Next code change: make pipes use the shared deferred-tool path (step 2).**
+No runtime replacement or general context framework
+is needed for this slice. Detailed scope and acceptance checks:
+[work protocol build plan](docs/work-protocol.md#next-where-to-pick-up).
+
+**2026-10-14: clarify the pipe from the call site.** Logical await/continue,
+blocking/checkpointing and connection/mailbox/pull delivery are separate choices.
+The panel tracks outstanding work in both logical modes. Endpoint authentication
+remains an open design question; the trusted local store's sender-name checks
+provide correlation, not proof of origin. Current explanation and build status:
+[work protocol](docs/work-protocol.md#start-at-the-call-site).
+
+**Implementation direction (2026-10-10, evening): start from the bare
+loop.** `examples/tool_loop.py` demonstrates `Pending`, `Lifted` and `ToolRunner`.
+Make `Pending` a shared tool outcome underneath `Pipe`, so `ChatAgent` handles
+deferred tools uniformly and the panel adds modes and controls. Shared lifting
+and strict await landed 2026-10-15; integration underneath `Pipe` is next.
 
 **2026-10-10: work protocol, case A prototyped.** `ChatAgent` delegates through
 pipes with a panel (`entourage/panel.py`), wait and connected modes, promotion,
@@ -48,13 +78,13 @@ Simple local file-backed communication supports debugging; Astral is a future
 binding for distributed delivery. Distributed delivery alone does not supply state
 failover. Second Brain retains application tasks, conversation and knowledge policy.
 
-**2026-10-10: work protocol drafted, not decided.** A durable handle as the
+**Earlier design discussion (2026-10-10): work protocol drafted.** A durable handle as the
 primitive between callers and providers; a session is most of that handle
 already. Brainstormed the same day: a wire sketch (provider decides within the
 caller's wait budget), pipes opened at runtime with capabilities checked like
 types, a panel per agent (grown from `entourage.exchanges`), and case A (an LLM
-loop calling subagents) worked through against `ChatAgent`. Next: prototype one
-`ChatAgent` delegating to another through a pipe. All in
+loop calling subagents) worked through against `ChatAgent`. The initial
+`ChatAgent`-to-`ChatAgent` prototype was then built as recorded above. All in
 [work protocol](docs/work-protocol.md), with a discussion log. Its first
 application, Library proposals, is Second Brain's.
 

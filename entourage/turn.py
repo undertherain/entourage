@@ -18,13 +18,10 @@ starts a job whose answer goes back to `reply_to`, and `steer`, `answer` and
 """
 
 import json
-import logging
 import time
-import traceback
 
+from .deferred_tools import Pending, run_tool
 from .panel import Panel
-
-log = logging.getLogger(__name__)
 
 NOW = 0.0
 """A deadline already in the past: the session is claimable again at once."""
@@ -131,7 +128,9 @@ class ChatAgent:
 
     `complete(messages, tool_schemas)` returns an assistant message dict (see
     `litellm_complete`). Tools expose `schema` and `execute(**arguments)`; a tool
-    failure is returned to the model as the tool result. `system_prompt` is a
+    may return `Pending` to run in a provider session under strict await. User
+    messages are buffered until those results arrive. A tool failure is returned
+    to the model as the tool result. `system_prompt` is a
     string or `(context, state) -> str`, inserted once at the first turn.
     `output` is the address answers are sent to; None keeps them in state only.
     `pipes` are `Pipe`s the model may delegate through; `clock` is the time
@@ -207,6 +206,8 @@ class ChatAgent:
         """Apply one reply from a provider to its panel entry and the conversation."""
         entry = reply.entry
         text = (reply.payload or {}).get("text") or ""
+        if entry.get("fenced"):
+            return  # caller cancelled: discard late updates and the final result
         if reply.kind == "progress":
             return
         if reply.kind == "ask":
@@ -214,11 +215,9 @@ class ChatAgent:
                          f"work {entry['to']} ({entry['label']}) asks: {text} "
                          f"(reply with answer, work={entry['to']!r})")
             return
-        if entry["status"] == "cancelled":
-            return  # fenced: the late result is discarded
         self._settle(state, panel, reply.request_id, entry,
                      f"work {entry['to']} ({entry['label']}) {entry['status']}: {text}"
-                     if entry["mode"] == "connected" else text)
+                     if entry["mode"] == "connected" or entry["status"] != "completed" else text)
 
     def _settle(self, state, panel, request_id, entry, content):
         """Write the outcome where the mode says: as the tool result or as a message."""
@@ -295,6 +294,13 @@ class ChatAgent:
             content = "asked; the answer arrives as a message"
         else:
             content = self._run_tool(name, arguments)
+        if isinstance(content, Pending):
+            request_id = panel.open(context, content.definition, {}, content.payload,
+                                    key=call["id"], label=name, mode="wait",
+                                    tool_call_id=call["id"], interruptible=False)
+            # A plain deferred tool promises a result, not interactive controls.
+            panel.table[request_id]["grants"] = []
+            return False
         state["messages"].append({"role": "tool", "tool_call_id": call["id"], "name": name,
                                   "content": content})
         return name == "ask_caller"
@@ -320,6 +326,8 @@ class ChatAgent:
         request_id, entry = panel.find(arguments.get("work"))
         if entry is None:
             return f"Tool error: no such work {arguments.get('work')!r}"
+        if "grants" in entry and name not in entry["grants"]:
+            return f"Tool error: work {entry['to']} does not support {name}"
         if name == "steer":
             panel.steer(context, request_id, arguments["text"], key=call["id"])
             return f"steered work {entry['to']}"
@@ -358,14 +366,4 @@ class ChatAgent:
         messages.insert(0, {"role": "system", "content": prompt})
 
     def _run_tool(self, name, arguments):
-        log.info("Calling tool %s", name)
-        try:
-            tool = self.tools[name]
-        except KeyError:
-            return f"Tool error: unknown tool {name!r}"
-        try:
-            result = tool.execute(**arguments)
-            return result if isinstance(result, str) else json.dumps(result)
-        except Exception as exc:  # noqa: BLE001 - the model must see the failure
-            log.debug("Tool %s failed:\n%s", name, traceback.format_exc())
-            return f"Tool error ({type(exc).__name__}): {exc}"
+        return run_tool(self.tools, name, arguments)
